@@ -13,7 +13,7 @@
 #
 # 1. Only recalculates new averages and credits using original/resit/exclude mark depending on standard rules (see Judith's email 02-Sep-2021)
 # 2. Currently cannot output merged cells for 2 columns under each unit - output is 1 column with code added to the mark e.g. "|30 | _R |" would be "30_R"
-# 3. Does not take higher mark if student in danger of failing i.e. no compensation
+# 3. Does not take higher mark if student in danger of failing i.e. no additional compensation, but this should be fairly rare
 # 4. Yr2 cumulative averages have not been checked and may be incorrect
 #
 # 
@@ -24,7 +24,8 @@
 # 05-Sep-2021  C. Dickinson   Calculate averages including resits
 # 06-Sep-2021  C. Dickinson   Many bug fixes after checking against 2019/2020 data - works perfectly now
 #                             Improved output formatting for easier reading
-#
+# 07-Sep-2021  C. Dickinson   Changed R1 to deferall so to use new mark and not capped (see Ivan's email 07-Sep-2021)
+
 ################################################################
 # INPUTS
 ################################################################
@@ -353,10 +354,12 @@ for anid in sids:
                 # Apply resit rules to see if original or resit mark is used or capped at 30%
                 if (thismark2 == '' or stumarks2[i].find('XN') >= 0):
                     thismark2 = thismark
-                if (stumarks[i].find('R') >= 0 and thismark >= 29.95):
+                if (stumarks[i].find('R') >= 0 and thismark >= 29.95): # should work for 18/19 still
                     thismark2 = thismark
-                if (stumarks[i].find('R') >= 0 and thismark < 29.95):
+                if (stumarks[i].find('R') >= 0 and thismark < 29.95):  # should work for 18/19 still
                     if (thismark2 > 30): thismark2 = 30
+                if (stumarks[i].find('R1')):  # R1 means deferall and should not be kept (should work for 18/19 still because no R1 used then)
+                    thismark2 = orig_resitmark
                         
                 # get credits
 
@@ -436,8 +439,8 @@ for anid in sids:
                 # credits passed
                 if (thismark >= 39.95): creditspassed += thiscredits
                 if thismark2 >= 39.95: creditspassed2 += thiscredits2  # 
-                if (thismark2 < 39.95 and orig_resitmark >= 39.95): creditspassed2 += thiscredits2 # for resits passed but capped/use original mark
-                        
+                elif (orig_resitmark >= 39.95): creditspassed2 += thiscredits2 # for resits passed but capped/use original mark
+                                        
                 # TESTING ONLY
                 print(anid,coursename, thismark, thismark2, excludethiscourse2, stumarks[i][-1], stumarks2[i], orig_resitmark)
                     
