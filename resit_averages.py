@@ -358,9 +358,9 @@ for anid in sids:
                     thismark2 = thismark
                 if (stumarks[i].find('R') >= 0 and thismark < 29.95):  # should work for 18/19 still
                     if (thismark2 > 30): thismark2 = 30
-                if (stumarks[i].find('R1')):  # R1 means deferall and should not be kept (should work for 18/19 still because no R1 used then)
+                if (stumarks[i].find('R1') >=0 ):  # R1 means deferall and should not be kept (should work for 18/19 still because no R1 used then)
                     thismark2 = orig_resitmark
-                        
+                    
                 # get credits
 
                 # must be a straightforward mark or a progression
@@ -442,7 +442,7 @@ for anid in sids:
                 elif (orig_resitmark >= 39.95): creditspassed2 += thiscredits2 # for resits passed but capped/use original mark
                                         
                 # TESTING ONLY
-                print(anid,coursename, thismark, thismark2, excludethiscourse2, stumarks[i][-1], stumarks2[i], orig_resitmark)
+                print(anid,coursename, thismark, thismark2, excludethiscourse2, stumarks[i], stumarks2[i], orig_resitmark)
                     
     # TESTING ONLY
     #print('*',meancredsum2, creditsformeansum2)
@@ -524,7 +524,7 @@ for anid in sids:
     dfallstudents = dfallstudents.append(dfthisstudent)
 
     #sys.exit(0)          # TESTING ONLY
-    #if (anid == '10637899'): sys.exit(0)
+    #if (anid == '10443485'): sys.exit(0)
     
 ################################################################           
 df_out = dfallstudents.copy()
