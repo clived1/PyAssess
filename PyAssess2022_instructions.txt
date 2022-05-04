@@ -116,6 +116,12 @@ RUNNING THE CODE
 
 If you want any other specific warnings, please let me know. There are many debugging print statements in the code which have all been commented out to reduce the amount of output.
 
+6. If you want to go into details, or if there is an issue with a particular student, there is a main FOR loop over each student. Each function adds information to the "Info" object. You can uncomment the 2 lines:
+
+#if (anid == '10134024'):
+    #    sys.exit(0)
+
+replacing the id to the student of interest (keep it in quotes, since it is a string at this point). The program will then stop and you can look in more detail at the "Info" object and its attributes. For example, Info.marksout is the marks that are outputted to the spreadsheet.
 
 
 
