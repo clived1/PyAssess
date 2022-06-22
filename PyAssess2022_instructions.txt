@@ -57,7 +57,9 @@ studtype = 2 # Maths and Physics students
 
 So if you have studtype=2, it will only pick out students that are on the Maths+Physics programme.
 
-4. You will need to edit the input filenames for each classyear. Remember this should be a .csv or .xls/.xlsx file format. Underneath where the classyear is set, you will see several “if” loops for each classyear, which is where the input files are set. You will need to change the variable “filename” to the appropriate csv file (again, in quotations, because it is a string). For example,
+4. encode_sids is an option which if set to True (encode_sids = True) then the IDs are encoded with a secret cipher and the output will not include names. The column header is then called "Emplid*" to indicate it is encoded.
+
+5. You will need to edit the input filenames for each classyear. Remember this should be a .csv or .xls/.xlsx file format. Underneath where the classyear is set, you will see several “if” loops for each classyear, which is where the input files are set. You will need to change the variable “filename” to the appropriate csv file (again, in quotations, because it is a string). For example,
 
 filename = ‘this_is_my_csv_file.csv’
 
@@ -71,7 +73,7 @@ filename = ‘this\ file.csv’
 
 So if there is a problem reading in a file containing spaces, try putting in “\” before each space in the filename inside the code.
 
-5. For 2nd year and above, you also need to set the Carry Forward file, which should be a csv or excel file. The variable is called “CFfilename” and is just below the main filename inside each classyear if loop (near the top of the program). For example, 
+6. For 2nd year and above, you also need to set the Carry Forward file, which should be a csv or excel file. The variable is called “CFfilename” and is just below the main filename inside each classyear if loop (near the top of the program). For example, 
 
 CFfilename = ‘a_CF_file.csv’
 
@@ -81,7 +83,7 @@ CFfilename = 'a_CF_file.xlsx'
 
 If this variable is set, it will automatically read in the data. If it is blank (CFfilenamee = '') then the CF data will be ignored.
 
-6. The output filenames for the excel (.xlsx) file is set just below the input filenames, again within each classyear if loop. The variable is called “outfilename”. An example is below for 1st year. There are 2 filenames to be set, one for Physics and one for Maths and Physics. Once these are changed, you will probably not want to change these again (it should overwrite the existing excel file each time you run if that is the case).  They are already set with sensible filenames and will write out to the current directory. 
+7. The output filenames for the excel (.xlsx) file is set just below the input filenames, again within each classyear if loop. The variable is called “outfilename”. An example is below for 1st year. There are 2 filenames to be set, one for Physics and one for Maths and Physics. Once these are changed, you will probably not want to change these again (it should overwrite the existing excel file each time you run if that is the case).  They are already set with sensible filenames and will write out to the current directory. 
 
 # output filename
     if (studtype==1): outfilename = '1styear_Physics.AY2021.prelimfinal.xlsx'   # Physics filename
@@ -100,7 +102,7 @@ would miss these two student IDs. This is typically for students with "PRO" mark
 ii) if you want to output different columns, you change the list called “columns” which is set by the function set_output_columns(). I've put in the main/appropriate ones already, but you may want to change it.
 
 
-8. When you’ve made the edits to the inputs, save the file using the menu or keyboard short-cut (probably Ctrl-S). You are now ready to run the code.
+9. When you’ve made the edits to the inputs, save the file using the menu or keyboard short-cut (probably Ctrl-S). You are now ready to run the code.
 
 
 RUNNING THE CODE
