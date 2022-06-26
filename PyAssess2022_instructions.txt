@@ -4,6 +4,8 @@ Instructions for running PyAssess2022.py Python code
 This document briefly outlines how to run the PyAssess2022.py Python code, which reads in CS exam grids in .xls/.xlsx or csv format, processes them, and creates output grids in Excel (.xlsx) format, with the appropriate averages, degree classification etc. The code is a complete re-write of the previous PyAssess2021.py code, which was based on an older code by Rob Appelby.
 
 Clive Dickinson 	April 2022 	Re-write complete and tested on 2019/2021 data 
+                        26-Jun-2022     Updated with encode_sids option and CF_flagfile
+
 
 STATUS OF CODE
 ===============
@@ -38,7 +40,7 @@ HOW TO SET-UP THE CODE TO RUN
 
 2. First, load in the PyAssess2022.py code into Spyder. Do this through the File menu at the top. You should see the code in the editing window on the left. It should be colour-coded to make it easier to read. Red are comments (after “#”) for example and are ignored by the code. It is recommended that you create a new directory (e.g. PyAssess2022) and put the code, grids etc. all in one place. If you prefer, you can put the grids into a sub-folder and put the full filename including folder. The output grids should also be output to this same directory, although again, you can use a sub-folder if you prefer.  
 
-3. You shouldn’t need to change anything detailed in the code, unless there is a problem. The main things to change are near the bottom of the code (after all the functions), mostly under the “INPUTS”. Hopefully, the comments in the code (usually in red, and after “#”) will help you.
+3. You shouldn’t need to change anything detailed in the code, unless there is a problem. The main things to change are near the top of the code (after the initial comments and imports),  mostly under the “MAIN INPUTS TO BE CHANED”. Hopefully, the comments in the code (usually in red, and after “#”) will help you.
 
 i) The academic year (AY) string. This determines some of the rules which can change year-to-year. For 2021/22, this should be set to 2022. i.e. AY=2022. For 2018/19 it would be AY=2019 for example.
 
@@ -57,9 +59,7 @@ studtype = 2 # Maths and Physics students
 
 So if you have studtype=2, it will only pick out students that are on the Maths+Physics programme.
 
-4. encode_sids is an option which if set to True (encode_sids = True) then the IDs are encoded with a secret cipher and the output will not include names. The column header is then called "Emplid*" to indicate it is encoded.
-
-5. You will need to edit the input filenames for each classyear. Remember this should be a .csv or .xls/.xlsx file format. Underneath where the classyear is set, you will see several “if” loops for each classyear, which is where the input files are set. You will need to change the variable “filename” to the appropriate csv file (again, in quotations, because it is a string). For example,
+4. You will need to edit the input filenames for each classyear. Remember this should be a .csv or .xls/.xlsx file format. Underneath where the classyear is set, you will see several “if” loops for each classyear, which is where the input files are set. You will need to change the variable “filename” to the appropriate csv file (again, in quotations, because it is a string). For example,
 
 filename = ‘this_is_my_csv_file.csv’
 
@@ -73,7 +73,7 @@ filename = ‘this\ file.csv’
 
 So if there is a problem reading in a file containing spaces, try putting in “\” before each space in the filename inside the code.
 
-6. For 2nd year and above, you also need to set the Carry Forward file, which should be a csv or excel file. The variable is called “CFfilename” and is just below the main filename inside each classyear if loop (near the top of the program). For example, 
+5. For 2nd year and above, you also need to set the Carry Forward file, which should be a csv or excel file. The variable is called “CFfilename” and is just below the main filename inside each classyear if loop (near the top of the program). For example, 
 
 CFfilename = ‘a_CF_file.csv’
 
@@ -83,7 +83,7 @@ CFfilename = 'a_CF_file.xlsx'
 
 If this variable is set, it will automatically read in the data. If it is blank (CFfilenamee = '') then the CF data will be ignored.
 
-7. The output filenames for the excel (.xlsx) file is set just below the input filenames, again within each classyear if loop. The variable is called “outfilename”. An example is below for 1st year. There are 2 filenames to be set, one for Physics and one for Maths and Physics. Once these are changed, you will probably not want to change these again (it should overwrite the existing excel file each time you run if that is the case).  They are already set with sensible filenames and will write out to the current directory. 
+6. The output filenames for the excel (.xlsx) file is set just below the input filenames, again within each classyear if loop. The variable is called “outfilename”. An example is below for 1st year. There are 2 filenames to be set, one for Physics and one for Maths and Physics. Once these are changed, you will probably not want to change these again (it should overwrite the existing excel file each time you run if that is the case).  They are already set with sensible filenames and will write out to the current directory. 
 
 # output filename
     if (studtype==1): outfilename = '1styear_Physics.AY2021.prelimfinal.xlsx'   # Physics filename
@@ -101,8 +101,11 @@ would miss these two student IDs. This is typically for students with "PRO" mark
 
 ii) if you want to output different columns, you change the list called “columns” which is set by the function set_output_columns(). I've put in the main/appropriate ones already, but you may want to change it.
 
+iii) the encode_sids == True (or False) option should normally be set to True. In this case, the output column is Emplid* which contains an encoded version of the student ID which begins with an "E". The original Emplid and Name are hidden columns (they are still there, but hidden). The code automatically outputs a txt file, with the same name as the output excel file (but .txt at the end) with a lookup table between Emplid and Emplid*. Note that the encoding is not random and can be decoded "by hand" if necessary (if you know how it is decoded).
 
-9. When you’ve made the edits to the inputs, save the file using the menu or keyboard short-cut (probably Ctrl-S). You are now ready to run the code.
+iv) CF_flagfile is the filename of the CF flag file. If set to '' (blank) it will be ignored. If a file, it will match students IDs and add a '*' to the appropriate year mark in that file.
+
+8. When you’ve made the edits to the inputs, save the file using the menu or keyboard short-cut (probably Ctrl-S). You are now ready to run the code.
 
 
 RUNNING THE CODE
