@@ -5,7 +5,7 @@ This document briefly outlines how to run the PyAssess2022.py Python code, which
 
 Clive Dickinson 	April 2022 	Re-write complete and tested on 2019/2021 data 
                         26-Jun-2022     Updated with encode_sids option and CF_flagfile
-
+                        27-Jun-2022     Pandas version warning
 
 STATUS OF CODE
 ===============
@@ -16,7 +16,7 @@ STATUS OF CODE
 INTRODUCTION:
 =============
 
-1. First, make sure Python 3.7 or 3.8 (or later) is installed on the machine. This is best done using the Anaconda distribution, which will give you the latest stable version (currently 3.8). This installs Python as well as a lot of environments for running it, and common libraries etc. including pandas, which is required.
+1. First, make sure Python 3.7 or 3.8 (or later) is installed on the machine. This is best done using the Anaconda distribution, which will give you the latest stable version (currently 3.8). This installs Python as well as a lot of environments for running it, and common libraries etc. including pandas, which is required. Note that the latest version of pandas currently gives lots of deprecation warnings (I'll fix this in the future). If you get these, then you need to revert to pandas vs 1.3.5. In Anaconda, this can be done on the command line using "condo install pandas=1.3.5".
 
 2. Probably the easiest environment is “Spyder” which comes with Anaconda. Start Spyder from the Anaconda menu or directly (it is usually in the Run Menu on windows inside the Anaconda tab, but you may need to search for it). When Spyder opens, you will see the environment window which can be customised. By default, there are usually 3 main “default” windows:
 
