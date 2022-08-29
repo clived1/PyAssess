@@ -6,11 +6,12 @@ This document briefly outlines how to run the PyAssess2022.py Python code, which
 Clive Dickinson 	April 2022 	Re-write complete and tested on 2019/2021 data 
                         26-Jun-2022     Updated with encode_sids option and CF_flagfile
                         27-Jun-2022     Pandas version warning
+			29-Aug-2022     Resit grids
 
 STATUS OF CODE
 ===============
 
--Fully tested on 2018/19 and 2020/21 data. Should give correct output for 99%+ of students but there may be some cases that are not correct, particularly in the degree classification/status for problematic cases.
+-Fully tested on 2018/19 and 2020/21 data. Should give correct output for 99%+ of students but there may be some cases that are not correct, particularly in the degree classification/status for problematic cases. The code can now also deal with resit grids, and should automatically detect them and read them in. It has only been tested on 2020/21 data so there may be some issues, particularly with complicated scenarios.
 
 
 INTRODUCTION:
