@@ -1,0 +1,146 @@
+Instructions for running PyAssess2032.py Python code
+==========================================
+
+This document briefly outlines how to run the PyAssess2022.py Python code, which reads in CS exam grids in .xls/.xlsx or csv format, processes them, and creates output grids in Excel (.xlsx) format, with the appropriate averages, degree classification etc. The code is a complete re-write of the previous PyAssess2021.py code, which was based on an older code by Rob Appelby.
+
+Clive Dickinson       April 2022 	  Re-write complete and tested on 2019/2021 data 
+                              	26-Jun-2022     Updated with encode_sids option and CF_flagfile
+                        	27-Jun-2022     Pandas version warning
+				29-Aug-2022    Resit grids
+				09-May-2023    Started new 2023 version 
+
+STATUS OF CODE
+===============
+
+-Fully tested on 2018/19 and 2020/21 data. Should give correct output for 99%+ of students but there may be some cases that are not correct, particularly in the degree classification/status for problematic cases. The code can now also deal with resit grids, and should automatically detect them and read them in. It has only been tested on 2020/21 data so there may be some issues, particularly with complicated scenarios.
+
+
+INTRODUCTION:
+=============
+
+1. First, make sure Python 3.8 (or later) is installed on the machine. This is best done using the Anaconda distribution, which will give you the latest stable version (currently v3.11 which is what I recommend). This installs Python as well as a lot of environments for running it, and common libraries etc. You will need to make sure that you have the following packages installed:
+
+i) pandas v1.3.5 or later (currently v2.0.1. which is what I recommend)
+ii) xlsxwriter v3.0.9 or later (currently 3.1.0 which is what I recommend)
+iii) openpyxl v3.1.2
+
+You can do this using the conda command line/terminal e.g. "conda install pandas=2.0.1" or "conda install pandas" to install the later version).
+
+2. Probably the easiest environment is “Spyder” which comes with Anaconda. Start Spyder from the Anaconda menu or directly (it is usually in the Run Menu on windows inside the Anaconda tab, but you may need to search for it). When Spyder opens, you will see the environment window which can be customised. By default, there are usually 3 main “default” windows:
+
+i) The left window is the editing window, where you load the Python (.py) code into and you can edit the code there, debug etc. 
+
+ii) The top right window is just for information about variables, functions and the like. You probably won’t need this. 
+
+iii) The bottom right window is the console window which is where the code is run and outputs to the screen. You might want to make this bigger if you want to see all the output from the program. You may also need to change the buffer size so that you can scroll far enough back after running the program as it can sometimes output a lot of lines. If the buffer/cache needs to be increased, you can do this in the Preferences/Settings menu for the console.
+
+3. You shouldn’t need to change anything in the code, except the few inputs outlined below. But whatever you change, please be careful with indentation (amount of gaps/spaces before each line), as it is very important for Python. If for some reason, code moves, it must have the same indentation as before. In particular, the input filenames (see below) are within an “if” loop, and therefore are indented once (which means 1 tab space, or  typically 4 spaces). If they are not indented (far left) or more indented (to the right), the code will not work as expected. Spyder will typically help with indentation, as it knows there is an “if” loop there i.e. it is best to edit the code within Spyder so that you can more easily see that the indentation correct. For the things you change, such as filenames, make sure the first character is at the right indentation - usually, there is an existing line that you can align to).
+
+4. The code can read in xls(x) files, OR. csv files. It will automatically detect the csv or xls/xlsx extension. In principle, there should be no substantial difference in speed except for the initial read in. Most runs should complete within a minute or less. If there are any issues with reading in, probably best to use xls/xlsx because there may be issues from the conversion of xls to csv. csv should be in UTF-8 coding/format.
+
+5. The code can now also read a separate Late Penalties file (col1 = course name, col2= ID, col3=pre-penalty mark, col4=post-penalty mark) which should be for both semesters. It does not change any calculation, but the output will contain the pre and post-mark (along with a _P code) and check that the post-mark was used in the average.
+
+
+HOW TO SET-UP THE CODE TO RUN
+==============================
+
+1. Run Spyder from the main program menu, or from the Anaconda menu.
+
+2. First, load in the PyAssess2022.py code into Spyder. Do this through the File menu at the top. You should see the code in the editing window on the left. It should be colour-coded to make it easier to read. Red are comments (after “#”) for example and are ignored by the code. It is recommended that you create a new directory (e.g. PyAssess2022) and put the code, grids etc. all in one place. If you prefer, you can put the grids into a sub-folder and put the full filename including folder. The output grids should also be output to this same directory, although again, you can use a sub-folder if you prefer.  
+
+3. You shouldn’t need to change anything detailed in the code, unless there is a problem. The main things to change are near the top of the code (after the initial comments and imports),  mostly under the “MAIN INPUTS TO BE CHANED”. Hopefully, the comments in the code (usually in red, and after “#”) will help you.
+
+i) The academic year (AY) string. This determines some of the rules which can change year-to-year. For 2021/22, this should be set to 2022. i.e. AY=2022. For 2018/19 it would be AY=2019 for example.
+
+ii) The classyear string. This tells the code which year and whether they are progressing (for 3rd year). Examples are below:
+
+classyear = 4   # for 4th year (MPhys)
+classyear = 32   # for  3rd year who are in their final year (i.e. BSc)
+classyear = 31   # for 3rd year who are progressing onto 4th year (i.e. MPhys)
+classyear = 2     # 2nd year
+classyear = 1     # 1st year
+
+iii) The studtype string. This tells the program whether they are “normal” physics students or are Maths and Physics students.
+
+studtype =1 # normal physics students
+studtype = 2 # Maths and Physics students
+
+So if you have studtype=2, it will only pick out students that are on the Maths+Physics programme.
+
+4. You will need to edit the input filenames for each classyear. Remember this should be a .csv or .xls/.xlsx file format. Underneath where the classyear is set, you will see several “if” loops for each classyear, which is where the input files are set. You will need to change the variable “filename” to the appropriate csv file (again, in quotations, because it is a string). For example,
+
+filename = ‘this_is_my_csv_file.csv’
+
+or 
+
+filename = 'this_is_my_excel_file.xlsx'
+
+If there are several filename variables listed, the last one listed will be used. If they are preceded by “#” they are comments and will be ignored. Note that it is easier if the filename does not have any spaces. But if it does, on some computers it may not work right away. On Windows machines and most operating systems, you can normally put spaces as long as they are in between quotation marks (which they should be). On my some older machines, spaces need an additional backslash (\) before the space, to tell the operating system it is a space. For example, the filename “this file.csv’ would be 
+
+filename = ‘this\ file.csv’
+
+So if there is a problem reading in a file containing spaces, try putting in “\” before each space in the filename inside the code.
+
+5. For 2nd year and above, you also need to set the Carry Forward file, which should be a csv or excel file. The variable is called “CFfilename” and is just below the main filename inside each classyear if loop (near the top of the program). For example, 
+
+CFfilename = ‘a_CF_file.csv’
+
+or 
+
+CFfilename = 'a_CF_file.xlsx'
+
+If this variable is set, it will automatically read in the data. If it is blank (CFfilenamee = '') then the CF data will be ignored.
+
+6. The output filenames for the excel (.xlsx) file is set just below the input filenames, again within each classyear if loop. The variable is called “outfilename”. An example is below for 1st year. There are 2 filenames to be set, one for Physics and one for Maths and Physics. Once these are changed, you will probably not want to change these again (it should overwrite the existing excel file each time you run if that is the case).  They are already set with sensible filenames and will write out to the current directory. 
+
+# output filename
+    if (studtype==1): outfilename = '1styear_Physics.AY2021.prelimfinal.xlsx'   # Physics filename
+    else: outfilename = '1styear_MathsPhysics.AY2021.prelimfinal.xlsx'   # M+P filename
+    
+NOT IMPLEMENTEED YET: 7. If a combined late penalty file is available, set this with late_penatly_filename, which is just before the filenames for each cohort. If set to '' (blank), then nothing will be done. If set to a xls/cvs file, it will match the student IDs/coursenames, and output both marks. It will also check that the post-penalty mark was the one actually used in the calculation.
+
+8. Most of the other options, you should not need to change. Below are a few things that might be useful to know:
+
+i) if you want to miss a specific student (e.g. because it is problematic), you can do this by adding the student ID into the variable “donotprocess”, which is just below the input files. For example,
+
+donotprocess = {‘10304702’,’10304703’} 
+
+would miss these two student IDs. This is typically for students with "PRO" marks. The IDs that were actually ignored in a particular run are printed to the screen at the successful completion of the program. Note that the student ID must be a string, so again, they are in quotation marks. 
+
+ii) if you want to output different columns, you change the list called “columns” which is set by the function set_output_columns(). I've put in the main/appropriate ones already, but you may want to change it.
+
+iii) the encode_sids == True (or False) option should normally be set to True. In this case, the output column is Emplid* which contains an encoded version of the student ID which begins with an "E". The original Emplid and Name are hidden columns (they are still there, but hidden). The code automatically outputs a txt file, with the same name as the output excel file (but .txt at the end) with a lookup table between Emplid and Emplid*. Note that the encoding is not random and can be decoded "by hand" if necessary (if you know how it is decoded).
+
+iv) CF_flagfile is the filename of the CF flag file. If set to '' (blank) it will be ignored. If a file, it will match students IDs and add a '*' to the appropriate year mark in that file.
+
+8. When you’ve made the edits to the inputs, save the file using the menu or keyboard short-cut (probably Ctrl-S). You are now ready to run the code.
+
+
+RUNNING THE CODE
+=================
+
+1. It is very simple, you just press go - this is the play button (green triangle pointing to the right near the top). Alternatively, you can use the menu to run the code, or you can type “run ./PyAssess2022.py” in the console window.  If it works, there will be some output for each student (“processing student….”) printed to the console window (usually in the bottom left - you may need to increase the size of this window) and the output excel file will be written out. 
+
+2. If it can’t find the input files, it will give an error and will quit the program. You will then need to check the filename and/or directory.
+
+3. There are a few warnings that can be printed to the screen. A common one is if there is no mark found for a particular course - most of the common ones without marks have been ignored so there shouldn't be many of these unless it is a blank file. It will also give a warning if it can’t find the credit weighting (e.g. "*WARNING: I do not know the credit weight for the mean of  PHYS20821"), which is potentially a serious error (it means it can’t include the mark in the average). It means that the course in question should have an entry in the "credweightunits" array. If there are no marks for this course or it is a zero-weighted course, then you it doesn't matter and you can safely ignore this warning.
+
+5. If successful, the code should end "Final output written to file.xlsx'
+
+If you want any other specific warnings, please let me know. There are many debugging print statements in the code which have all been commented out to reduce the amount of output.
+
+6. If you want to go into details, or if there is an issue with a particular student, there is a main FOR loop over each student. Each function adds information to the "Info" object. You can uncomment the 2 lines:
+
+#if (anid == '10134024'):
+    #    sys.exit(0)
+
+replacing the id to the student of interest (keep it in quotes, since it is a string at this point). The program will then stop and you can look in more detail at the "Info" object and its attributes. For example, Info.marksout is the marks that are outputted to the spreadsheet.
+
+
+
+
+
+
+
+
+
