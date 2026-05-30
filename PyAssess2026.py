@@ -6,6 +6,7 @@
 # Version: 0.0.1
 
 import argparse
+import math
 import os
 import re
 import sys
@@ -21,6 +22,57 @@ from openpyxl.utils import get_column_letter
 AY    = 2025                  # Academic year (2025 = AY 2024-25 etc.)
 INDIR = "data2025_newcodes"   # Directory containing input exam grid spreadsheets
 OUTDIR = "./"                # Output directory for generated spreadsheets
+
+# Pass mark for any individual unit
+PASS_MARK = 39.95
+
+# Minimum mark in any unit to avoid outright fail (30%)
+MIN_MARK = 29.95
+
+# Degree classification boundaries
+BOUNDARY_FIRST  = 69.95
+BOUNDARY_UPPER2 = 59.95
+BOUNDARY_LOWER2 = 49.95
+BOUNDARY_THIRD  = 39.95
+
+# Credit thresholds for Y1/Y2 progression
+MIN_CREDITS_TO_PROGRESS  = 80   # credits at >= PASS_MARK needed to progress without resits
+MIN_PASS_CREDITS         = 60   # credits at >= PASS_MARK needed at first attempt to avoid FAIL
+
+FINAL_CLASSYEARS = ['32', '32m', '4', '4m']   # graduating / final-year students
+
+# Units that must be passed if taken (lab, BSc project, MPhys project)
+MUST_PASS = frozenset({'PHYS10180', 'PHYS10280', 'PHYS20180', 'PHYS20280',
+                       'PHYS30180', 'PHYS30280', 'PHYS30880', 'PHYS30881',
+                       'PHYS30882', 'PHYS40181', 'PHYS40182'})
+
+# Maths units that Y1 M+P students must pass — cannot be compensated
+MUST_PASS_MATHS = frozenset({'MATH10111', 'MATH10121', 'MATH10212', 'MATH11222',
+                              'MATH11121', 'MATH11022', 'MATH29141', 'MATH24420'})
+
+# Core Physics units (required for resit decisions)
+CORE_PHYSICS = frozenset({
+    'PHYS10071',
+    'PHYS10101',
+    'PHYS10121',
+    'PHYS10191',
+    'PHYS10302',
+    'PHYS10342',
+    'PHYS10372',
+    'PHYS20101',
+    'PHYS20141',
+    'PHYS20151',   # Y2 changed in 2025 (replaces PHYS20161 - Judith email 30-Jun-2025)
+    'PHYS20171',
+    'PHYS20302',   # Y2 changed in 2025 (replaces PHYS20252 - Judith email 06-May-2025)
+    'PHYS20342',   # Y2 changed in 2025 (replaces PHYS20312 - Judith email 06-May-2025)
+    'PHYS20352',
+})
+
+# Additional core maths units for Maths+Physics students
+CORE_MATHS_PHYSICS = frozenset({
+    'MATH10111', 'MATH10121', 'MATH10212', 'MATH11222',
+    'MATH11121', 'MATH11022', 'MATH29141', 'MATH24420',
+})
 
 # ===========================================================================
 # Per-class-year file mappings
@@ -85,9 +137,16 @@ def _split_codes(value):
     return frozenset(c for c in _CODE_SPLIT_RE.split(str(value).strip()) if c)
 
 
-# Mit_circs codes that are specifically actioned in calc_credits().
+# Mit_circs codes that are specifically actioned in exclude_units().
 # Any code NOT in this set is copied to the output code column as-is.
 _PROCESSED_MIT_CODES = frozenset({'AA', 'EA'})
+
+# Classyears where deferrals (EA) and resits apply.
+_DEFERRAL_CLASSYEARS = frozenset({'1', '1m', '2', '2m'})
+
+# EN codes indicating a mark carried forward from a previous attempt.
+_CARRIED_EN_CODES = frozenset({'L1C', 'L2C', 'L3C'})
+
 
 
 def _parse_module(module):
@@ -116,7 +175,7 @@ class UnitInfo:
         self.mark        = mark                   # unit mark (float) or None
         self.en          = en                     # EN flag (str) or None
         self.mit_circs   = mit_circs              # mitigating circumstances code (str) or None
-        self.passed      = None                   # True/False once calc_credits() runs; None = no mark
+        self.passed      = None                   # True/False once exclude_units() runs; None = no mark
         self.excluded    = False                  # True if excluded from year mark
         self.output_code = None                   # code(s) written to the output code column
 
@@ -134,8 +193,17 @@ class StudentInfo:
         'units_passed', 'award', 'classification',
         'units', 'trailing',
         'yearmark',
-        'credits_taken', 'credits_passed', 'credits_excluded', 'creds_passed_taken',
+        'credits_taken', 'credits_passed', 'credits_excluded', 'credits_deferred', 'creds_passed_taken',
+        'excluded_idx', 'excluded_courses',
+        'failed_idx', 'failed_courses',
+        'deferred_idx', 'deferred_courses',
+        'some_unit_under_30',
+        'zone_idx', 'zone_courses',
+        'compensated_idx', 'compensated_courses', 'credits_compensated',
+        'referred_idx', 'referred_courses',
         'resits',
+        'fail', 'fail_reason',
+        'status',
     )
 
     def __init__(self):
@@ -156,25 +224,52 @@ class StudentInfo:
         self.trailing       = {}     # trailing columns: normalised name -> value
         self.yearmark           = None   # credit-weighted average of unit marks
         self.credits_taken      = None   # total credits with a mark
-        self.credits_passed     = None   # credits where mark > 39.95
+        self.credits_passed     = None   # credits where mark > PASS_MARK
         self.credits_excluded   = 0      # credits excluded from calculation (populated later)
+        self.credits_deferred   = 0      # credits from deferred (EA) units (assumed passed)
         self.creds_passed_taken = None   # formatted string for output, e.g. '120 / 120'
-        self.resits             = None   # deferred/resit courses for output, e.g. 'PHYS10071[1] / PHYS10101[1]'
+        self.excluded_idx       = []     # indices into self.units of excluded units
+        self.excluded_courses   = []     # coursenames of excluded units
+        self.failed_idx         = []     # indices into self.units of failed units
+        self.failed_courses     = []     # coursenames of failed units
+        self.deferred_idx       = []     # indices into self.units of deferred (EA) units
+        self.deferred_courses   = []     # coursenames of deferred units
+        self.some_unit_under_30  = False  # True if any failed unit is below MIN_MARK (30%)
+        self.zone_idx            = []     # indices of units in compensation zone (MIN_MARK < mark <= PASS_MARK)
+        self.zone_courses        = []     # coursenames of zone units
+        self.compensated_idx     = []     # indices of units compensated (failed but allowed to count)
+        self.compensated_courses = []     # coursenames of compensated units
+        self.credits_compensated = 0      # total credits compensated
+        self.referred_idx        = []     # indices of units referred (R2 resit)
+        self.referred_courses    = []     # coursenames of referred units
+        self.resits              = None   # deferred/resit courses for output, e.g. 'PHYS10071[1] / PHYS10101[1]'
+        self.fail                = False  # True if student cannot progress
+        self.fail_reason         = ''     # short description of why student failed
+        self.status              = None   # set once by calc_status(): 'ACTV', 'A/D', 'REVW', 'FAIL'
 
-    def calc_credits(self):
+    def exclude_units(self, classyear=None):
         """Set credits_taken/passed/excluded, creds_passed_taken, and unit flags.
 
         Exclusion rules applied here:
-          AA in mit_circs → unit is excluded from year mark, treated as passed,
-                            output_code set to 'X'.
-        Excluded credits still count towards credits_passed.
+          EA in mit_circs → deferral; only actioned for years 1/2
+                            (classyear in _DEFERRAL_CLASSYEARS). Excluded from year
+                            mark, treated as passed for outcome checks, but NOT
+                            counted in credits_passed.
+          AA in mit_circs → excluded from year mark, treated as passed,
+                            output_code set to 'X'; credits counted in credits_passed.
         """
-        taken      = 0
-        passed     = 0
-        excluded   = 0
-        resit_list = []
+        taken            = 0
+        passed           = 0
+        excluded         = 0
+        deferred_creds   = 0
+        excluded_idx     = []
+        excluded_courses = []
+        failed_idx       = []
+        failed_courses   = []
+        deferred_idx     = []
+        deferred_courses = []
 
-        for unit in self.units:
+        for idx, unit in enumerate(self.units):
             if unit.module is None or unit.credits is None:
                 continue                             # empty slot
 
@@ -183,19 +278,22 @@ class StudentInfo:
             en_codes   = _split_codes(unit.en)
             used_mit   = set()                       # mit codes consumed by a rule
             used_en    = set()                       # EN codes consumed by a rule
+            coursename = unit.coursename or unit.module
 
-            # --- EA deferral (highest priority; trumps AA and all other mit codes) ---
-            if 'EA' in mit_codes:
+            # --- EA deferral (years 1/2 only; highest priority, trumps AA and all other mit codes) ---
+            if 'EA' in mit_codes and classyear in _DEFERRAL_CLASSYEARS:
                 unit.excluded = True
-                unit.passed   = True
-                if 'XN' in en_codes:                 # missed exam → XL_R1
+                unit.passed   = True           # treated as passed for outcome checks
+                if 'XN' in en_codes:           # missed exam → XL_R1
                     unit.output_code = _append_code(unit.output_code, 'XL_R1')
                     used_en.add('XN')
                 else:
                     unit.output_code = _append_code(unit.output_code, 'R1')
-                excluded += unit.credits
-                passed   += unit.credits
-                resit_list.append(f"{unit.coursename or unit.module}[1]")
+                excluded       += unit.credits  # excluded from year mark
+                deferred_creds += unit.credits  # assumed passed for credit-count purposes
+                # deferral credits deliberately NOT added to passed/credits_passed
+                excluded_idx.append(idx);  excluded_courses.append(coursename)
+                deferred_idx.append(idx);  deferred_courses.append(coursename)
                 used_mit.update(mit_codes)           # EA trumps: mark all mit codes used
 
             # --- AA exclusion ---
@@ -205,7 +303,23 @@ class StudentInfo:
                 unit.output_code = _append_code(unit.output_code, 'X')
                 excluded += unit.credits
                 passed   += unit.credits
+                excluded_idx.append(idx);  excluded_courses.append(coursename)
                 used_mit.add('AA')
+
+            # --- L1C/L2C/L3C (carried mark): exclude from year average, treat as passed ---
+            elif en_codes & _CARRIED_EN_CODES:
+                unit.excluded = True
+                unit.passed   = True
+                excluded += unit.credits
+                passed   += unit.credits
+                excluded_idx.append(idx);  excluded_courses.append(coursename)
+                # carried code not added to used_en, so it copies through to the output code column
+
+            # --- XN (missed exam): counts as failed, mark still used in year mark average ---
+            elif 'XN' in en_codes:
+                unit.passed = False
+                failed_idx.append(idx);  failed_courses.append(coursename)
+                # XN not added to used_en, so it copies through to the output code column
 
             # --- no mark: exclude (treat as passed, omit from year mark) ---
             elif unit.mark is None:
@@ -213,15 +327,18 @@ class StudentInfo:
                 unit.passed   = True
                 excluded += unit.credits
                 passed   += unit.credits
+                excluded_idx.append(idx);  excluded_courses.append(coursename)
 
             # --- normal pass/fail ---
             else:
                 try:
-                    unit.passed = float(unit.mark) > 39.95
+                    unit.passed = float(unit.mark) > PASS_MARK
                 except (TypeError, ValueError):
                     unit.passed = False              # non-numeric mark counts as fail
                 if unit.passed:
                     passed += unit.credits
+                else:
+                    failed_idx.append(idx);  failed_courses.append(coursename)
 
             # --- copy through any unprocessed EN and mit_circs codes ---
             for code in sorted(en_codes - used_en):
@@ -232,8 +349,15 @@ class StudentInfo:
         self.credits_taken      = taken
         self.credits_passed     = passed
         self.credits_excluded   = excluded
+        self.credits_deferred   = deferred_creds
         self.creds_passed_taken = f"{passed} / {taken}"
-        self.resits             = ' / '.join(resit_list) if resit_list else None
+        self.excluded_idx       = excluded_idx
+        self.excluded_courses   = excluded_courses
+        self.failed_idx         = failed_idx
+        self.failed_courses     = failed_courses
+        self.deferred_idx       = deferred_idx
+        self.deferred_courses   = deferred_courses
+        self.resits             = ' / '.join(f"{c}[1]" for c in deferred_courses) or None
 
     def calc_yearmark(self):
         """Set self.yearmark to the credit-weighted mean of all unit marks.
@@ -254,8 +378,202 @@ class StudentInfo:
                 continue
             weighted_marks += mark * unit.credits
             total_credits  += unit.credits
-        self.yearmark = (round(weighted_marks / total_credits, 1)
+        self.yearmark = (math.floor(weighted_marks / total_credits * 10 + 0.5) / 10
                          if total_credits > 0 else None)
+
+    def calc_status(self, classyear):
+        """Set self.status once, reading flags set by earlier methods.
+
+        Priority order:
+          FAIL  — self.fail is True
+          A/D   — one or more deferrals (self.deferred_idx non-empty)
+          REVW  — one or more referrals, no deferrals (self.referred_idx non-empty)
+          ACTV  — default: active, fine to progress
+        """
+        if classyear in FINAL_CLASSYEARS:
+            return
+        if self.fail:
+            self.status = 'FAIL'
+        elif self.deferred_idx:
+            self.status = 'A/D'
+        elif self.referred_idx:
+            self.status = 'REVW'
+        else:
+            self.status = 'ACTV'
+
+    def calc_referrals(self, classyear):
+        """Determine compensation and referrals for non-final-year students.
+
+        Lab mark = 39 exception (Y1/Y2/Y3 progressing):
+          If a MUST_PASS unit has mark == 39 and enough other credits exist,
+          the student is not an outright fail — the lab is referred (R2) instead.
+
+        Y1/Y2 paths (after excluding lab-39 units from fail check):
+          Full compensation (failed <= 40 credits, no unit under 30%):
+            All failed units not in MUST_PASS (/ MUST_PASS_MATHS for '1m') get 'C'.
+          Referral (some_unit_under_30):
+            Units <= MIN_MARK → R2; zone core → R2;
+            zone non-core within 40 credits → C; zone non-core over cap → R2.
+          >40 credits, no unit under 30%:
+            All core zone units → R2; non-core TBD.
+        """
+        if classyear in FINAL_CLASSYEARS:
+            return
+
+        # --- Lab mark = 39 exception (all non-final years) ---
+        lab_39_idx = set()
+        for idx in self.failed_idx:
+            unit       = self.units[idx]
+            coursename = unit.coursename or unit.module
+            if coursename in MUST_PASS:
+                try:
+                    mark = float(unit.mark)
+                except (TypeError, ValueError):
+                    mark = None
+                if mark == 39.0:
+                    lab_credits = unit.credits or 0
+                    if ((self.credits_passed or 0) + self.credits_deferred
+                            >= MIN_PASS_CREDITS - lab_credits):
+                        lab_39_idx.add(idx)
+
+        if classyear not in _DEFERRAL_CLASSYEARS:
+            # Y3 progressing: only lab-39 exception applies
+            if lab_39_idx:
+                referred_idx     = []
+                referred_courses = []
+                for idx in self.failed_idx:   # preserve failed_idx order
+                    if idx in lab_39_idx:
+                        unit = self.units[idx]
+                        coursename = unit.coursename or unit.module
+                        unit.output_code = _append_code(unit.output_code, 'R2')
+                        referred_idx.append(idx)
+                        referred_courses.append(coursename)
+                self.referred_idx     = referred_idx
+                self.referred_courses = referred_courses
+                self.fail_reason      = 'Resit failed lab'
+                resit_parts  = [f"{c}[1]" for c in self.deferred_courses]
+                resit_parts += referred_courses
+                self.resits  = ' / '.join(resit_parts) or None
+            return
+
+        # --- Y1/Y2 FAIL check (lab-39 exceptions excluded) ---
+        if any(c in MUST_PASS
+               for idx, c in zip(self.failed_idx, self.failed_courses)
+               if idx not in lab_39_idx):
+            self.fail        = True
+            self.fail_reason = 'Failed lab'
+            return
+        if (self.credits_passed or 0) + self.credits_deferred < MIN_PASS_CREDITS:
+            self.fail        = True
+            self.fail_reason = '<60 credits'
+            return
+
+        # Remaining failed units excluding lab-39 exceptions
+        other_failed_idx = [i for i in self.failed_idx if i not in lab_39_idx]
+
+        # --- classify remaining failed units ---
+        failed_credits     = 0
+        some_unit_under_30 = False
+        for idx in other_failed_idx:
+            unit            = self.units[idx]
+            failed_credits += unit.credits or 0
+            try:
+                if not (float(unit.mark) > MIN_MARK):
+                    some_unit_under_30 = True
+            except (TypeError, ValueError):
+                some_unit_under_30 = True
+
+        self.some_unit_under_30 = some_unit_under_30
+
+        must_pass_for_cy = MUST_PASS | (MUST_PASS_MATHS if classyear == '1m' else frozenset())
+        core_for_cy      = CORE_PHYSICS | (CORE_MATHS_PHYSICS if classyear in ('1m', '2m')
+                                           else frozenset())
+
+        zone_idx            = []
+        zone_courses        = []
+        compensated_idx     = []
+        compensated_courses = []
+        referred_idx        = []
+        referred_courses    = []
+
+        if failed_credits <= 40 and not some_unit_under_30:
+            # --- full compensation path ---
+            for idx in other_failed_idx:
+                unit       = self.units[idx]
+                coursename = unit.coursename or unit.module
+                if coursename not in must_pass_for_cy:
+                    unit.output_code = _append_code(unit.output_code, 'C')
+                    compensated_idx.append(idx)
+                    compensated_courses.append(coursename)
+
+        elif some_unit_under_30:
+            # --- referral path ---
+            compensation_used = 0
+            for idx in other_failed_idx:
+                unit       = self.units[idx]
+                coursename = unit.coursename or unit.module
+                try:
+                    mark = float(unit.mark)
+                except (TypeError, ValueError):
+                    mark = 0.0
+                if not (mark > MIN_MARK):
+                    unit.output_code = _append_code(unit.output_code, 'R2')
+                    referred_idx.append(idx)
+                    referred_courses.append(coursename)
+                else:
+                    zone_idx.append(idx)
+                    zone_courses.append(coursename)
+                    if coursename in core_for_cy:
+                        unit.output_code = _append_code(unit.output_code, 'R2')
+                        referred_idx.append(idx)
+                        referred_courses.append(coursename)
+                    elif compensation_used + (unit.credits or 0) <= 40:
+                        unit.output_code = _append_code(unit.output_code, 'C')
+                        compensation_used += unit.credits or 0
+                        compensated_idx.append(idx)
+                        compensated_courses.append(coursename)
+                    else:
+                        unit.output_code = _append_code(unit.output_code, 'R2')
+                        referred_idx.append(idx)
+                        referred_courses.append(coursename)
+
+        else:
+            # --- >40 credits, all in 30–39% zone (no unit below 30%) ---
+            for idx in other_failed_idx:
+                unit       = self.units[idx]
+                coursename = unit.coursename or unit.module
+                zone_idx.append(idx)
+                zone_courses.append(coursename)
+                if coursename in core_for_cy:
+                    unit.output_code = _append_code(unit.output_code, 'R2')
+                    referred_idx.append(idx)
+                    referred_courses.append(coursename)
+                # non-core in this case: TBD
+
+        # --- Add lab-39 referrals (appended after other referrals) ---
+        if lab_39_idx:
+            for idx in self.failed_idx:   # preserve failed_idx order
+                if idx in lab_39_idx:
+                    unit = self.units[idx]
+                    coursename = unit.coursename or unit.module
+                    unit.output_code = _append_code(unit.output_code, 'R2')
+                    referred_idx.append(idx)
+                    referred_courses.append(coursename)
+            self.fail_reason = 'Resit failed lab'
+
+        # --- Assign all results ---
+        self.zone_idx            = zone_idx
+        self.zone_courses        = zone_courses
+        self.compensated_idx     = compensated_idx
+        self.compensated_courses = compensated_courses
+        self.credits_compensated = sum(self.units[i].credits or 0 for i in compensated_idx)
+        self.referred_idx        = referred_idx
+        self.referred_courses    = referred_courses
+
+        if referred_idx:
+            resit_parts  = [f"{c}[1]" for c in self.deferred_courses]
+            resit_parts += referred_courses
+            self.resits  = ' / '.join(resit_parts) or None
 
     def __repr__(self):
         return (f'StudentInfo(emplid={self.emplid!r}, name={self.name!r}, '
@@ -491,6 +809,7 @@ _COL_WIDTHS = {
 _FONT        = Font(name='Aptos Narrow', size=11)
 _FONT_BOLD   = Font(name='Aptos Narrow', size=11, bold=True)
 _FILL_GREY   = PatternFill(fill_type='solid', fgColor='FFE0E0E0')
+_FILL_YELLOW = PatternFill(fill_type='solid', fgColor='FFFFFF00')
 _ALIGN_CTR   = Alignment(horizontal='center')
 _INFO_ROW_H  = 17.0   # height of student info rows
 
@@ -514,6 +833,8 @@ _FIXED_COLS = [
 _TRAILING_ATTR = {
     'Creds Passed/Taken': 'creds_passed_taken',
     'Year Mark':          'yearmark',
+    'Status':             'status',
+    'Fail reason':        'fail_reason',
     'Resits':             'resits',
 }
 
@@ -561,7 +882,7 @@ def write_students(students, outpath, classyear):
 
     wb = Workbook()
     ws = wb.active
-    ws.title = 'Assessment'
+    ws.title = '2 Line Format'
 
     # ------------------------------------------------------------------ widths
     for i, (label, _) in enumerate(_FIXED_COLS, start=1):
@@ -633,9 +954,12 @@ def write_students(students, outpath, classyear):
             _c(marks_row, i)
 
         # marks row — unit marks and output codes
+        failed_set = set(s.failed_idx)
         for i, unit in enumerate(s.units):
             col = u_start + 2 * i
-            _c(marks_row, col,     unit.mark)
+            mark_cell = _c(marks_row, col, unit.mark)
+            if i in failed_set:
+                mark_cell.fill = _FILL_YELLOW
             _c(marks_row, col + 1, unit.output_code)
 
         # marks row — trailing
@@ -721,8 +1045,10 @@ def main():
         print(f"             {len(students)} students, "
               f"{len(students[0].units)} units each")
         for s in students:
-            s.calc_credits()
+            s.exclude_units(cy)
             s.calc_yearmark()
+            s.calc_referrals(cy)
+            s.calc_status(cy)
         write_students(students, outpath, cy)
 
 
