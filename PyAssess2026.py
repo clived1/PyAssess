@@ -121,7 +121,8 @@ _UNIT_COL_OFFSETS = {'module': 0, 'mark': 3, 'en': 4, 'mit_circs': 5}
 # Data classes
 # ===========================================================================
 
-_MODULE_RE = re.compile(r'^(.*?)\s*\((\d+)\)\s*$')
+_MODULE_RE      = re.compile(r'^(.*?)\s*\((\d+)\)\s*$')
+_COURSE_LEVEL_RE = re.compile(r'^[A-Za-z]+(\d)')
 
 
 def _append_code(existing, new_code):
@@ -148,8 +149,17 @@ _PROCESSED_MIT_CODES = frozenset({'AA', 'EA'})
 # Classyears where deferrals (EA) and resits apply.
 _DEFERRAL_CLASSYEARS = frozenset({'1', '1m', '2', '2m'})
 
+# Classyears where L3/L4 credit tallies are computed.
+_LEVEL_CREDIT_CLASSYEARS = frozenset({'31', '31m', '32', '32m', '4', '4m'})
+
 # EN codes indicating a mark carried forward from a previous attempt.
 _CARRIED_EN_CODES = frozenset({'L1C', 'L2C', 'L3C'})
+
+# Overall-mark year weights for physics (non-M+P) programmes.
+# Keys are year numbers (1–4); values are base weights (renormalised when years are missing).
+_BSC_WEIGHTS          = {1: 10,  2: 30,  3: 60}           # BSc and MPhys Y1–Y3
+_MPHYS_WEIGHTS        = {1:  6,  2: 19,  3: 37.5, 4: 37.5}  # standard MPhys Y4
+_MPHYS_ABROAD_WEIGHTS = {1:  8,  2: 23,  3: 23,   4: 46}    # MPhys with Y3 study abroad
 
 
 
@@ -165,6 +175,17 @@ def _parse_module(module):
     if m:
         return m.group(1).strip(), int(m.group(2))
     return module, None
+
+
+def _course_level(coursename):
+    """Return the level digit (int) from a module code like 'PHYS30471', or None.
+
+    The level is the first digit after the leading letters, e.g. PHYS3xxxx → 3.
+    """
+    if not coursename:
+        return None
+    m = _COURSE_LEVEL_RE.match(coursename)
+    return int(m.group(1)) if m else None
 
 
 _MARK_NUM_RE = re.compile(r'^\s*([\d.]+)\s*([A-Za-z]*)\s*$')
@@ -226,7 +247,7 @@ class StudentInfo:
     """All data for a single student, read from one row of the exam grid."""
     __slots__ = (
         'emplid', 'name', 'id_no', 'uf', 'mc', 'bz',
-        'admit_term', 'entry_type', 'psi', 'plan',
+        'admit_term', 'entry_type', 'psi', 'plan', 'is_mphys_track', 'is_study_abroad',
         'units_passed', 'award', 'classification',
         'units', 'trailing',
         'yearmark',
@@ -243,6 +264,8 @@ class StudentInfo:
         'status',
         'phys_yearmark', 'math_yearmark',
         'phys1', 'phys2', 'phys3',
+        'credits_l3', 'credits_l4', 'l3_l4_creds_passed',
+        'overall',
     )
 
     def __init__(self):
@@ -256,6 +279,8 @@ class StudentInfo:
         self.entry_type     = None
         self.psi            = None
         self.plan           = None   # degree programme, e.g. 'MPhys(Hons) Physics'
+        self.is_mphys_track  = False  # True if plan is MPhys or MMath (4-year course)
+        self.is_study_abroad = False  # True if MPhys student with Y3 study abroad
         self.units_passed   = None
         self.award          = None
         self.classification = None
@@ -290,6 +315,10 @@ class StudentInfo:
         self.phys1               = None   # previous Y1 mark (from L1CM trailing column)
         self.phys2               = None   # previous Y2 mark (from L2CM trailing column)
         self.phys3               = None   # previous Y3 mark (from L3CM trailing column)
+        self.credits_l3          = 0      # credits passed at level 3
+        self.credits_l4          = 0      # credits passed at level 4 (incl. levels 5 and 6)
+        self.l3_l4_creds_passed  = None   # formatted string, e.g. '80 + 40 = 120'
+        self.overall             = None   # weighted overall mark across years
 
     def exclude_units(self, classyear=None):
         """Set credits_taken/passed/excluded, creds_passed_taken, and unit flags.
@@ -299,8 +328,14 @@ class StudentInfo:
                             (classyear in _DEFERRAL_CLASSYEARS). Excluded from year
                             mark, treated as passed for outcome checks, but NOT
                             counted in credits_passed.
-          AA in mit_circs → excluded from year mark, treated as passed,
-                            output_code set to 'X'; credits counted in credits_passed.
+          CA in mit_circs → deferral (years 1/2 only); excluded from year mark,
+                            treated as passed for outcome checks, but NOT counted
+                            in credits_passed.
+          AA in mit_circs → excluded from year mark, treated as passed for progression,
+                            output_code set to 'X'.
+          credits_passed is determined purely by mark (> PASS_MARK), regardless of
+          exclusion codes.  Excluded units whose mark does not pass instead count
+          toward the progression check via credits_deferred.
         """
         taken            = 0
         passed           = 0
@@ -333,20 +368,27 @@ class StudentInfo:
                     used_en.add('XN')
                 else:
                     unit.output_code = _append_code(unit.output_code, 'R1')
-                excluded       += unit.credits  # excluded from year mark
-                deferred_creds += unit.credits  # assumed passed for credit-count purposes
-                # deferral credits deliberately NOT added to passed/credits_passed
+                excluded += unit.credits
                 excluded_idx.append(idx);  excluded_courses.append(coursename)
                 deferred_idx.append(idx);  deferred_courses.append(coursename)
                 used_mit.update(mit_codes)           # EA trumps: mark all mit codes used
 
+            # --- CA deferral (years 1/2 only) ---
+            elif 'CA' in mit_codes and classyear in _DEFERRAL_CLASSYEARS:
+                unit.excluded = True
+                unit.passed   = True           # treated as passed for outcome checks
+                unit.output_code = _append_code(unit.output_code, 'R1')
+                excluded += unit.credits
+                excluded_idx.append(idx);  excluded_courses.append(coursename)
+                deferred_idx.append(idx);  deferred_courses.append(coursename)
+                used_mit.add('CA')
+
             # --- AA exclusion ---
             elif 'AA' in mit_codes:
                 unit.excluded    = True
-                unit.passed      = True
+                unit.passed      = True           # treated as passed for outcome checks
                 unit.output_code = _append_code(unit.output_code, 'X')
                 excluded += unit.credits
-                passed   += unit.credits
                 excluded_idx.append(idx);  excluded_courses.append(coursename)
                 used_mit.add('AA')
 
@@ -355,7 +397,6 @@ class StudentInfo:
                 unit.excluded = True
                 unit.passed   = True
                 excluded += unit.credits
-                passed   += unit.credits
                 excluded_idx.append(idx);  excluded_courses.append(coursename)
                 # carried code not added to used_en, so it copies through to the output code column
 
@@ -365,30 +406,27 @@ class StudentInfo:
                 failed_idx.append(idx);  failed_courses.append(coursename)
                 # XN not added to used_en, so it copies through to the output code column
 
-            # --- no mark: exclude (treat as passed, omit from year mark) ---
-            elif unit.mark is None:
-                unit.excluded = True
-                unit.passed   = True
-                excluded += unit.credits
-                passed   += unit.credits
-                excluded_idx.append(idx);  excluded_courses.append(coursename)
-
-            # --- normal pass/fail ---
+            # --- normal pass/fail (including no mark, which counts as failed) ---
             else:
                 num = _numeric_mark(unit.mark)
                 unit.passed = num is not None and num > PASS_MARK
-                if unit.passed:
-                    passed += unit.credits
-                else:
+                if not unit.passed:
                     failed_idx.append(idx);  failed_courses.append(coursename)
+
+            # --- credit accumulation: purely mark-based for credits_passed ---
+            # Excluded units whose mark doesn't pass still count for the progression check.
+            mark_num = _numeric_mark(unit.mark)
+            if mark_num is not None and mark_num > PASS_MARK:
+                passed += unit.credits
+            elif unit.excluded:
+                deferred_creds += unit.credits
 
             # --- copy through any unprocessed EN and mit_circs codes ---
             for code in sorted(en_codes - used_en):
                 if code == 'R2':
-                    # If the mark already has an 'R' suffix it was capped externally;
-                    # do not cap again or annotate the output code.
+                    unit.output_code = _append_code(unit.output_code, '2nd att.')
+                    # R suffix means already capped externally; otherwise cap at 30 in yearmark.
                     if _mark_suffix(unit.mark) != 'R':
-                        unit.output_code = _append_code(unit.output_code, 'cap')
                         unit.capped = True
                 elif code == 'R1':
                     pass  # R1 = 1st-attempt resit; treat as normal, no output annotation
@@ -462,10 +500,12 @@ class StudentInfo:
           A/D   — one or more deferrals, no referrals (self.deferred_idx non-empty)
           ACTV  — default: active, fine to progress
 
-        Y2 MPhys/MMath additional yearmark check (applied to ACTV students only):
-          > MPHYS_PROGRESS_MARK  → ACTV  (can progress to MPhys/MMath Y3)
-          > MPHYS_REVIEW_MARK    → R/X   (borderline; reviewed later)
-          <= MPHYS_REVIEW_MARK   → R/BSc (transferred to BSc programme)
+        Y2 MPhys/MMath additional yearmark check (non-FAIL students on 4-year course):
+          > MPHYS_PROGRESS_MARK  → status unchanged (ACTV/REVW/A/D as normal)
+          <= MPHYS_PROGRESS_MARK, referrals but no deferrals  → REVW_BSc
+          <= MPHYS_PROGRESS_MARK, ACTV or has deferrals:
+            > MPHYS_REVIEW_MARK  → R/X   (borderline; reviewed later)
+            <= MPHYS_REVIEW_MARK → R/BSc (transferred to BSc programme)
         """
         if classyear in FINAL_CLASSYEARS:
             return
@@ -479,19 +519,101 @@ class StudentInfo:
         else:
             self.status = 'ACTV'
 
-        # Y2 MPhys/MMath yearmark progression check (only for ACTV students).
-        if (self.status == 'ACTV'
-                and classyear in ('2', '2m')
-                and ('MPhys' in (self.plan or '') or 'MMath' in (self.plan or ''))):
+        # Y2 MPhys/MMath yearmark progression check (4-year course, non-FAIL students).
+        if (classyear in ('2', '2m')
+                and self.is_mphys_track
+                and self.status != 'FAIL'):
             ym = self.yearmark
             if ym is None:
-                pass  # no yearmark available — leave as ACTV
+                pass  # no yearmark — leave status as-is
             elif ym > MPHYS_PROGRESS_MARK:
-                pass  # fine to progress — status stays ACTV
-            elif ym > MPHYS_REVIEW_MARK:
-                self.status = 'R/X'
+                pass  # above 55% — fine to progress, leave status as-is
+            elif self.referred_idx and not self.deferred_idx:
+                self.status = 'REVW_BSc'
             else:
-                self.status = 'R/BSc'
+                # ACTV or has deferrals (with or without referrals)
+                if ym > MPHYS_REVIEW_MARK:
+                    self.status = 'R/X'
+                else:
+                    self.status = 'R/BSc'
+
+    def calc_level_credits(self):
+        """Count passed credits at level 3 and level 4 (levels 5/6 treated as level 4).
+
+        A unit is counted if its numeric mark is > PASS_MARK, regardless of exclusion codes.
+        Sets credits_l3, credits_l4, and l3_l4_creds_passed (e.g. '80+40=120').
+        """
+        l3 = 0
+        l4 = 0
+        for idx, unit in enumerate(self.units):
+            if unit.credits is None or unit.module is None:
+                continue
+            mark_num = _numeric_mark(unit.mark)
+            if mark_num is None or not (mark_num > PASS_MARK):
+                continue
+            level = _course_level(unit.coursename or unit.module)
+            if level == 3:
+                l3 += unit.credits
+            elif level in (4, 5, 6):
+                l4 += unit.credits
+        self.credits_l3         = l3
+        self.credits_l4         = l4
+        self.l3_l4_creds_passed = f"{l3} + {l4} = {l3 + l4}"
+
+    def calc_overall(self, classyear):
+        """Set self.overall to the weighted overall mark across available year marks.
+
+        Physics (non-M+P) base weights:
+          BSc / MPhys Y1–Y3 (_BSC_WEIGHTS):       Y1=10, Y2=30, Y3=60
+          Standard MPhys Y4 (_MPHYS_WEIGHTS):      Y1=6,  Y2=19, Y3=37.5, Y4=37.5
+          MPhys Y3 study abroad (_MPHYS_ABROAD_WEIGHTS): Y1=8, Y2=23, Y3=23, Y4=46
+
+        Missing years (None or the '-1' sentinel) are dropped and the remaining
+        weights renormalised so their ratios are preserved.  Sets self.overall to
+        '-1' if no valid year marks are available.
+
+        M+P variants use the same weights as their non-M+P counterparts.
+        Study abroad only applies to MPhys (not MMath), handled via is_study_abroad.
+        """
+        # Strip 'm' suffix so M+P variants share the same branch as non-M+P.
+        base = classyear.rstrip('m')
+
+        # Build (base_weight, mark_value) list for the years available this classyear.
+        w = _BSC_WEIGHTS   # default weights for years 1–3
+        if base == '1':
+            candidates = [(w[1], self.yearmark)]
+        elif base == '2':
+            candidates = [(w[1], self.phys1), (w[2], self.yearmark)]
+        elif base in ('31', '32'):
+            candidates = [(w[1], self.phys1), (w[2], self.phys2), (w[3], self.yearmark)]
+        elif base == '4':
+            w = _MPHYS_ABROAD_WEIGHTS if self.is_study_abroad else _MPHYS_WEIGHTS
+            candidates = [
+                (w[1], self.phys1),
+                (w[2], self.phys2),
+                (w[3], self.phys3),
+                (w[4], self.yearmark),
+            ]
+        else:
+            return
+
+        # Keep only years with a valid numeric mark (drop None and '-1' sentinel).
+        valid = []
+        for weight, mark in candidates:
+            try:
+                f = float(mark)
+                if f >= 0:
+                    valid.append((weight, f))
+            except (TypeError, ValueError):
+                pass
+
+        if not valid:
+            self.overall = '-1'
+            return
+
+        total_weight = sum(w for w, _ in valid)
+        weighted_sum = sum(w * m for w, m in valid)
+        self.overall = math.floor(weighted_sum / total_weight * 10 + 0.5) / 10
 
     def calc_referrals(self, classyear):
         """Determine compensation and referrals for non-final-year students.
@@ -501,10 +623,9 @@ class StudentInfo:
         A MUST_PASS unit with mark < 39 is an outright fail ('Failed lab').
 
         Units with EN code 'R2' were already taken as a 2nd attempt; no further
-        resit can be offered.  If such a unit has mark < 30% the student fails
-        outright.  In the zone (30-39%) compensation rules apply as normal, but
-        if the rules would assign R2 (core/must-pass unit, or over credit cap)
-        the student fails outright instead.
+        resit can be offered.  If such a unit has mark < 30%, or is in the zone
+        (30-39%), the student fails outright — 2nd-attempt units are never
+        compensated.
 
         Y1/Y2 paths:
           Full compensation (failed <= 40 credits, no unit under 30%):
@@ -624,6 +745,10 @@ class StudentInfo:
                     referred_idx.append(idx)
                     referred_courses.append(coursename)
                 else:
+                    if idx in r2_en_idx:
+                        self.fail        = True
+                        self.fail_reason = 'Failed 2nd attempt'
+                        return
                     unit.output_code = _append_code(unit.output_code, 'C')
                     compensated_idx.append(idx)
                     compensated_courses.append(coursename)
@@ -656,6 +781,10 @@ class StudentInfo:
                         referred_idx.append(idx)
                         referred_courses.append(coursename)
                     elif compensation_used + (unit.credits or 0) <= 40:
+                        if idx in r2_en_idx:
+                            self.fail        = True
+                            self.fail_reason = 'Failed 2nd attempt'
+                            return
                         unit.output_code = _append_code(unit.output_code, 'C')
                         compensation_used += unit.credits or 0
                         compensated_idx.append(idx)
@@ -686,6 +815,10 @@ class StudentInfo:
                     referred_idx.append(idx)
                     referred_courses.append(coursename)
                 else:
+                    if idx in r2_en_idx:
+                        self.fail        = True
+                        self.fail_reason = 'Failed 2nd attempt'
+                        return
                     unit.output_code = _append_code(unit.output_code, 'C')
                     compensated_idx.append(idx)
                     compensated_courses.append(coursename)
@@ -824,6 +957,9 @@ def read_students(filepath):
         s = StudentInfo()
         for attr, col in _STUDENT_COLS:
             setattr(s, attr, _cell(row, col))
+        s.is_mphys_track  = bool(s.plan and ('MPhys' in s.plan or 'MMath' in s.plan))
+        s.is_study_abroad = bool(s.plan and 'MPhys' in s.plan
+                                 and 'study' in s.plan.lower())
 
         s.units = [
             UnitInfo(
@@ -916,11 +1052,11 @@ _COL_WIDTHS = {
     'Notes':                    50.00,
     'Pre-Exam Board Minutes':   40.00,
     'Exam Board Minutes':       40.00,
-    'Phys 1':                   10.00,
-    'Phys 2':                   10.00,
-    'Phys 3':                   10.00,
-    'BZ':                        8.00,
-    'Overall':                  10.00,
+    'Phys 1':                   7.00,
+    'Phys 2':                   7.00,
+    'Phys 3':                   7.00,
+    'BZ':                       7.00,
+    'Overall':                  8.00,
     'L3/L4 creds passed':       16.00,
     'L4 creds passed Y3+Y4':    18.00,
     'Y3 creds failed w/wo MCs': 18.00,
@@ -977,16 +1113,19 @@ _PREV_YEARMARK_COLS = {
 # Populated as computed attributes are added; write_students uses this to
 # fill in values rather than leaving those cells blank.
 _TRAILING_ATTR = {
-    'Creds Passed/Taken': 'creds_passed_taken',
-    'Year Mark':          'yearmark',
-    'Phys Year Mark':     'phys_yearmark',
-    'Math Year Mark':     'math_yearmark',
-    'Phys 1':             'phys1',
-    'Phys 2':             'phys2',
-    'Phys 3':             'phys3',
-    'Status':             'status',
-    'Fail reason':        'fail_reason',
-    'Resits':             'resits',
+    'Creds Passed/Taken':    'creds_passed_taken',
+    'Year Mark':             'yearmark',
+    'Phys Year Mark':        'phys_yearmark',
+    'Math Year Mark':        'math_yearmark',
+    'Phys 1':                'phys1',
+    'Phys 2':                'phys2',
+    'Phys 3':                'phys3',
+    'Status':                'status',
+    'Fail reason':           'fail_reason',
+    'Resits':                'resits',
+    'L3/L4 creds passed':    'l3_l4_creds_passed',
+    'L4 creds passed Y3+Y4': 'l3_l4_creds_passed',
+    'Overall':               'overall',
 }
 
 # Excel number formats applied to trailing columns that hold computed floats.
@@ -1111,7 +1250,8 @@ def write_students(students, outpath, classyear):
         for i, unit in enumerate(s.units):
             col = u_start + 2 * i
             mark_cell = _c(marks_row, col, unit.mark)
-            if i in yellow_set:
+            mark_num  = _numeric_mark(unit.mark)
+            if i in yellow_set or (mark_num is not None and mark_num <= PASS_MARK):
                 mark_cell.fill = _FILL_YELLOW
             _c(marks_row, col + 1, unit.output_code)
 
@@ -1229,6 +1369,9 @@ def main():
             s.calc_yearmark(cy)
             s.calc_referrals(cy)
             s.calc_status(cy)
+            if cy in _LEVEL_CREDIT_CLASSYEARS:
+                s.calc_level_credits()
+            s.calc_overall(cy)
 
             # ***For testing/debugging keep this here (comment out when doing actual runs)
             #print(s.emplid, s.name)
