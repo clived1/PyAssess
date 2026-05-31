@@ -39,6 +39,11 @@ BOUNDARY_THIRD  = 39.95
 MIN_CREDITS_TO_PROGRESS  = 80   # credits at >= PASS_MARK needed to progress without resits
 MIN_PASS_CREDITS         = 60   # credits at >= PASS_MARK needed at first attempt to avoid FAIL
 
+# Y2 yearmark thresholds for MPhys/MMath progression
+MPHYS_PROGRESS_MARK = 54.95   # must exceed this to progress to MPhys/MMath Y3 (ACTV)
+MPHYS_REVIEW_MARK   = 52.95   # borderline band: >this but <=MPHYS_PROGRESS_MARK → R/X
+                               # at or below this → R/BSc (moved to BSc programme)
+
 FINAL_CLASSYEARS = ['32', '32m', '4', '4m']   # graduating / final-year students
 
 # Units that must be passed if taken (lab, BSc project, MPhys project)
@@ -162,7 +167,7 @@ def _parse_module(module):
     return module, None
 
 
-_MARK_NUM_RE = re.compile(r'^\s*([\d.]+)\s*[A-Za-z]*\s*$')
+_MARK_NUM_RE = re.compile(r'^\s*([\d.]+)\s*([A-Za-z]*)\s*$')
 
 def _numeric_mark(value):
     """Return the numeric part of a mark value, stripping any trailing letter suffix.
@@ -182,6 +187,16 @@ def _numeric_mark(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+def _mark_suffix(value):
+    """Return the letter suffix of a mark value in upper case, or '' if none.
+
+    E.g. '30R' → 'R', '35C' → 'C', '40' → ''.
+    """
+    if value is None:
+        return ''
+    m = _MARK_NUM_RE.match(str(value).strip())
+    return m.group(2).upper() if m else ''
 
 
 class UnitInfo:
@@ -227,6 +242,7 @@ class StudentInfo:
         'fail', 'fail_reason',
         'status',
         'phys_yearmark', 'math_yearmark',
+        'phys1', 'phys2', 'phys3',
     )
 
     def __init__(self):
@@ -271,6 +287,9 @@ class StudentInfo:
         self.status              = None   # set once by calc_status(): 'ACTV', 'A/D', 'REVW', 'FAIL'
         self.phys_yearmark       = None   # M+P only: credit-weighted average of non-MATH units
         self.math_yearmark       = None   # M+P only: credit-weighted average of MATH units
+        self.phys1               = None   # previous Y1 mark (from L1CM trailing column)
+        self.phys2               = None   # previous Y2 mark (from L2CM trailing column)
+        self.phys3               = None   # previous Y3 mark (from L3CM trailing column)
 
     def exclude_units(self, classyear=None):
         """Set credits_taken/passed/excluded, creds_passed_taken, and unit flags.
@@ -366,8 +385,11 @@ class StudentInfo:
             # --- copy through any unprocessed EN and mit_circs codes ---
             for code in sorted(en_codes - used_en):
                 if code == 'R2':
-                    unit.output_code = _append_code(unit.output_code, 'cap')
-                    unit.capped = True
+                    # If the mark already has an 'R' suffix it was capped externally;
+                    # do not cap again or annotate the output code.
+                    if _mark_suffix(unit.mark) != 'R':
+                        unit.output_code = _append_code(unit.output_code, 'cap')
+                        unit.capped = True
                 elif code == 'R1':
                     pass  # R1 = 1st-attempt resit; treat as normal, no output annotation
                 else:
@@ -394,10 +416,10 @@ class StudentInfo:
         For M+P classyears also sets self.phys_yearmark (non-MATH units) and
         self.math_yearmark (units whose coursename contains 'MATH').
         Units with a missing mark or missing credits are skipped.
-        Results are rounded to 1 decimal place; None if no valid units found.
+        Results are rounded to 1 decimal place; '-1' if no valid units found.
         """
         def _round1dp(weighted, credits):
-            return math.floor(weighted / credits * 10 + 0.5) / 10 if credits > 0 else None
+            return math.floor(weighted / credits * 10 + 0.5) / 10 if credits > 0 else '-1'
 
         total_credits  = 0
         weighted_marks = 0.0
@@ -439,6 +461,11 @@ class StudentInfo:
           REVW  — one or more referrals (self.referred_idx non-empty), with or without deferrals
           A/D   — one or more deferrals, no referrals (self.deferred_idx non-empty)
           ACTV  — default: active, fine to progress
+
+        Y2 MPhys/MMath additional yearmark check (applied to ACTV students only):
+          > MPHYS_PROGRESS_MARK  → ACTV  (can progress to MPhys/MMath Y3)
+          > MPHYS_REVIEW_MARK    → R/X   (borderline; reviewed later)
+          <= MPHYS_REVIEW_MARK   → R/BSc (transferred to BSc programme)
         """
         if classyear in FINAL_CLASSYEARS:
             return
@@ -451,6 +478,20 @@ class StudentInfo:
             self.status = 'A/D'
         else:
             self.status = 'ACTV'
+
+        # Y2 MPhys/MMath yearmark progression check (only for ACTV students).
+        if (self.status == 'ACTV'
+                and classyear in ('2', '2m')
+                and ('MPhys' in (self.plan or '') or 'MMath' in (self.plan or ''))):
+            ym = self.yearmark
+            if ym is None:
+                pass  # no yearmark available — leave as ACTV
+            elif ym > MPHYS_PROGRESS_MARK:
+                pass  # fine to progress — status stays ACTV
+            elif ym > MPHYS_REVIEW_MARK:
+                self.status = 'R/X'
+            else:
+                self.status = 'R/BSc'
 
     def calc_referrals(self, classyear):
         """Determine compensation and referrals for non-final-year students.
@@ -902,6 +943,7 @@ _FONT_BOLD   = Font(name='Aptos Narrow', size=11, bold=True)
 _FILL_GREY   = PatternFill(fill_type='solid', fgColor='FFE0E0E0')
 _FILL_YELLOW = PatternFill(fill_type='solid', fgColor='FFFFFF00')
 _ALIGN_CTR   = Alignment(horizontal='center')
+_ALIGN_RIGHT = Alignment(horizontal='right')
 _INFO_ROW_H  = 17.0   # height of student info rows
 
 _SIDE_THIN    = Side(border_style='thin', color='FF808080')   # vertical column separators
@@ -918,6 +960,19 @@ _FIXED_COLS = [
 ]
 
 
+# Maps classyear → {StudentInfo attr: input trailing column key} for previous
+# year marks.  The current year's LxCM column is intentionally excluded.
+_PREV_YEARMARK_COLS = {
+    '2':   {'phys1': 'L1CM'},
+    '2m':  {'phys1': 'L1CM'},
+    '31':  {'phys1': 'L1CM', 'phys2': 'L2CM'},
+    '31m': {'phys1': 'L1CM', 'phys2': 'L2CM'},
+    '32':  {'phys1': 'L1CM', 'phys2': 'L2CM'},
+    '32m': {'phys1': 'L1CM', 'phys2': 'L2CM'},
+    '4':   {'phys1': 'L1CM', 'phys2': 'L2CM', 'phys3': 'L3CM'},
+    '4m':  {'phys1': 'L1CM', 'phys2': 'L2CM', 'phys3': 'L3CM'},
+}
+
 # Maps trailing column header names to StudentInfo attribute names.
 # Populated as computed attributes are added; write_students uses this to
 # fill in values rather than leaving those cells blank.
@@ -926,6 +981,9 @@ _TRAILING_ATTR = {
     'Year Mark':          'yearmark',
     'Phys Year Mark':     'phys_yearmark',
     'Math Year Mark':     'math_yearmark',
+    'Phys 1':             'phys1',
+    'Phys 2':             'phys2',
+    'Phys 3':             'phys3',
     'Status':             'status',
     'Fail reason':        'fail_reason',
     'Resits':             'resits',
@@ -1041,6 +1099,8 @@ def write_students(students, outpath, classyear):
             fmt   = _TRAILING_FORMAT.get(tname)
             if fmt:
                 cell.number_format = fmt
+            if value == '-1':
+                cell.alignment = _ALIGN_RIGHT
 
         # marks row — fixed columns (blank; needed for fill and borders)
         for i in range(1, n_fixed + 1):
@@ -1129,25 +1189,56 @@ def main():
     args = parse_args()
     classyears = resolve_classyears(args.classyear)
 
+    multi = len(classyears) > 1
+    errors = 0
+
     for cy in classyears:
         infile, outfile = CLASSYEAR_FILES[cy]
         inpath  = os.path.join(INDIR,  infile)
         outpath = os.path.join(OUTDIR, outfile)
         print(f"classyear {cy:>3s}: reading {inpath} ...")
-        students = read_students(inpath)
+
+        try:
+            students = read_students(inpath)
+        except FileNotFoundError:
+            print(f"  WARNING: file not found — {inpath}")
+            errors += 1
+            if multi:
+                continue
+            else:
+                sys.exit(1)
+        except Exception as exc:
+            print(f"  WARNING: could not read {inpath} — {exc}")
+            errors += 1
+            if multi:
+                continue
+            else:
+                sys.exit(1)
+
         print(f"             {len(students)} students, "
               f"{len(students[0].units)} units each")
+        prev_cols = _PREV_YEARMARK_COLS.get(cy, {})
         for s in students:
+            for attr, col_key in prev_cols.items():
+                val = s.trailing.get(col_key)
+                try:
+                    setattr(s, attr, math.floor(float(val) * 10 + 0.5) / 10)
+                except (TypeError, ValueError):
+                    setattr(s, attr, '-1')
             s.exclude_units(cy)
             s.calc_yearmark(cy)
             s.calc_referrals(cy)
             s.calc_status(cy)
 
             # ***For testing/debugging keep this here (comment out when doing actual runs)
-            '''if (s.emplid == '11391048'):
-                from IPython import embed
-                embed()'''
+            #print(s.emplid, s.name)
+            #if (s.emplid == 11116225):
+            #    from IPython import embed
+            #    embed()
         write_students(students, outpath, cy)
+
+    if errors and multi:
+        print(f"\n{errors} classyear(s) skipped due to missing or unreadable input files.")
 
 
 
