@@ -3,12 +3,13 @@
 # PyAssess2026.py - generates processed exam grids for Physics@Manchester
 # Author: Clive Dickinson
 # Date: 2026-05-30
-# Version: 0.0.1
+# Version: 1.0 (02-Jun-2026 almost ready for June exams - resits will do over the summer)
 
 import argparse
 import math
 import os
 import re
+import statistics
 import sys
 
 import pandas as pd
@@ -19,9 +20,22 @@ from openpyxl.utils import get_column_letter
 # ===========================================================================
 # Constants — update as required
 # ===========================================================================
-AY    = 2025                  # Academic year (2025 = AY 2024-25 etc.)
-INDIR = "data2025_newcodes"   # Directory containing input exam grid spreadsheets
-OUTDIR = "./"                # Output directory for generated spreadsheets
+AY          = 2025                  # Academic year (2025 = AY 2024-25 etc.)
+INDIR       = "data2025_newcodes"   # Directory containing input exam grid spreadsheets
+OUTDIR      = "./"                  # Output directory for generated spreadsheets
+SORT_OUTPUT = False                 # Sort output by mark (descending); overridden by --sort
+
+# Additional excel files to be read in
+Y3_CREDITS_FILENAME = "y4-comp-and-L4-2025.xlsx"  # supplementary Y3 credit data for Y4 students
+CF_FLAG_FILE = os.path.join(INDIR, 'PHYS Carry forward.xlsx')  # carry-forward notes (set to None to disable)
+
+# Special-status student lists.  Add emplids (int or str) to override normal
+# processing.  Matched students have their status (progressing years) or
+# Deg Class Alg/Actual (final years) set to the corresponding label, all
+# computed output codes cleared, and resits/fail reasons removed.
+interrupt_list = []   # interrupted studies  → 'Interrupt'
+manual_list    = []   # manual board decision → 'Manual'
+withdrawn_list = []   # withdrawn students   → 'Withdrawn'
 
 # Pass mark for any individual unit
 PASS_MARK = 39.95
@@ -35,6 +49,52 @@ BOUNDARY_UPPER2 = 59.95
 BOUNDARY_LOWER2 = 49.95
 BOUNDARY_THIRD  = 39.95
 
+# BSc L3 credit requirements for degree classification.
+# For 1st/2.1/2.2 the student must have passed >= BSC_L3_CREDITS_UPPER credits at
+# level 3 (mark > PASS_MARK), including all MUST_PASS units (lab and dissertation).
+# For a proper 3rd they need >= BSC_L3_CREDITS_THIRD L3 credits including MUST_PASS units;
+# for an ordinary 3rd they need >= BSC_L3_CREDITS_THIRD without the MUST_PASS requirement.
+BSC_L3_CREDITS_UPPER = 80
+BSC_L3_CREDITS_THIRD = 60
+
+# Borderline zone width below each upper-class boundary (2%) and the third boundary (3%).
+# A student whose overall mark falls within this band below the next boundary is considered
+# borderline and may be promoted by algorithms A or B.
+BSC_BORDERLINE_UPPER = 2.0   # applies to 1st, 2.1, 2.2 boundaries
+BSC_BORDERLINE_THIRD = 3.0   # applies to the 3rd-class boundary
+
+# Minimum L3 credits (at marks >= the target boundary) for borderline promotion.
+# Algorithm A requires >= BSC_PROMO_A_CREDITS;
+# Algorithm B requires >= BSC_PROMO_B_CREDITS but also needs
+# the BSc dissertation to be at the target level and yearmark > overall.
+BSC_PROMO_A_CREDITS = 80
+BSC_PROMO_B_CREDITS = 70
+
+# MPhys/MMath (4-year) degree classification credit requirements.
+# Classification mirrors the BSc rules but over the combined Y3+Y4 (level 3 and
+# above) credits, assuming 240 credits taken across the two years.  A student must
+# pass >= MPHYS_CREDITS_FULL credits (including the project) for the class their
+# overall mark implies; if short by up to 20 credits (>= MPHYS_CREDITS_SHORT) and
+# the project is passed, the class is dropped one level.  There is no 3rd class:
+# anyone who fails the 2nd-class requirements, or scores below the 2.2 boundary
+# without being promoted, reverts to a BSc based on their first three years.
+MPHYS_CREDITS_TOTAL = 240    # nominal Y3+Y4 credits taken
+MPHYS_CREDITS_FULL  = 200    # credits passed (incl. project) for the mark-indicated class
+MPHYS_CREDITS_SHORT = 180    # short-credit floor (up to 20 short) → one class lower
+# Borderline promotion (analogous to BSc algorithm A): a borderline student is
+# promoted to the class above if they passed >= Y4_PROMO_CREDITS credits in
+# Y4 at level 3+ achieving at least the target-class boundary mark.
+Y4_PROMO_CREDITS = 75
+
+# BSc dissertation modules — used to locate the dissertation unit for Algorithm B.
+BSC_DISSERTATION_MODULES = frozenset({'PHYS30880', 'PHYS30881', 'PHYS30882'})
+
+# Professional placement and year-abroad module codes.
+# If a student has one of these units and the mark is absent (blank, -1, or
+# a non-numeric string such as 'P'/'F'), they are classified as 'Intercal'.
+PP_MODULES     = frozenset({'PHYS30810', 'PHYS40810'})
+ABROAD_MODULES = frozenset({'PHYS31000', 'PHYS41000'})
+
 # Credit thresholds for Y1/Y2 progression
 MIN_CREDITS_TO_PROGRESS  = 80   # credits at >= PASS_MARK needed to progress without resits
 MIN_PASS_CREDITS         = 60   # credits at >= PASS_MARK needed at first attempt to avoid FAIL
@@ -43,6 +103,12 @@ MIN_PASS_CREDITS         = 60   # credits at >= PASS_MARK needed at first attemp
 MPHYS_PROGRESS_MARK = 54.95   # must exceed this to progress to MPhys/MMath Y3 (ACTV)
 MPHYS_REVIEW_MARK   = 52.95   # borderline band: >this but <=MPHYS_PROGRESS_MARK → R/X
                                # at or below this → R/BSc (moved to BSc programme)
+
+# Y3 MPhys/MMath → Y4 progression thresholds (classyear 31/31m)
+MPHYS_Y3_PROG_YEARMARK       = 49.95   # yearmark must exceed this to progress
+MPHYS_Y3_PROG_OVERALL        = 49.95   # overall mark must exceed this to progress
+MPHYS_Y3_PROG_CREDITS        = 100     # minimum credits passed (mark > PASS_MARK) to progress
+MPHYS_Y3_PROG_PHYS_MATH_MARK = 44.95  # MMath only: both phys and maths yearmarks must exceed this
 
 FINAL_CLASSYEARS = ['32', '32m', '4', '4m']   # graduating / final-year students
 
@@ -105,6 +171,20 @@ CLASSYEAR_FILES = {
 
 ALL_CLASSYEARS = list(CLASSYEAR_FILES.keys())
 
+# Human-readable description for each classyear key (used in reports).
+_CY_DESC = {
+    '1':   'Y1 Physics',
+    '1m':  'Y1 Maths+Physics',
+    '2':   'Y2 Physics',
+    '2m':  'Y2 Maths+Physics',
+    '31':  'Y3 MPhys (progressing)',
+    '31m': 'Y3 MMath (progressing)',
+    '32':  'Y3 BSc Physics',
+    '32m': 'Y3 BSc Maths+Physics',
+    '4':   'Y4 MPhys',
+    '4m':  'Y4 MMath',
+}
+
 # ===========================================================================
 # Excel sheet layout (same across all input files)
 # ===========================================================================
@@ -123,6 +203,24 @@ _UNIT_COL_OFFSETS = {'module': 0, 'mark': 3, 'en': 4, 'mit_circs': 5}
 
 _MODULE_RE      = re.compile(r'^(.*?)\s*\((\d+)\)\s*$')
 _COURSE_LEVEL_RE = re.compile(r'^[A-Za-z]+(\d)')
+
+
+def _mark_is_absent(mark):
+    """Return True if *mark* indicates no real numeric result is available.
+
+    Covers: None, blank, non-numeric strings (e.g. 'P', 'F'), and negative
+    values (e.g. the -1 sentinel for a missing mark).
+    """
+    v = _numeric_mark(mark)
+    return v is None or v < 0
+
+
+def _norm_eid(v):
+    """Normalise an emplid to a plain integer string for comparison."""
+    try:
+        return str(int(float(str(v).strip())))
+    except (TypeError, ValueError):
+        return str(v).strip()
 
 
 def _append_code(existing, new_code):
@@ -248,6 +346,7 @@ class StudentInfo:
     __slots__ = (
         'emplid', 'name', 'id_no', 'uf', 'mc', 'bz',
         'admit_term', 'entry_type', 'psi', 'plan', 'is_mphys_track', 'is_study_abroad',
+        'is_pp', 'is_abroad',
         'units_passed', 'award', 'classification',
         'units', 'trailing',
         'yearmark',
@@ -265,7 +364,17 @@ class StudentInfo:
         'phys_yearmark', 'math_yearmark',
         'phys1', 'phys2', 'phys3',
         'credits_l3', 'credits_l4', 'l3_l4_creds_passed',
+        'credits_l3_first', 'credits_l3_upper2', 'credits_l3_lower2', 'credits_l3_third',
+        'credits_l3plus_first', 'credits_l3plus_upper2', 'credits_l3plus_lower2', 'credits_l3plus_third',
         'overall',
+        'project_mark', 'project_creds',
+        'deg_class_alg', 'deg_class_actual',
+        'borderline_for', 'deg_class_rev',
+        'y3creds_below40_not_excl', 'y3creds_below40_excl', 'y3creds_l4_passed',
+        'y3creds_below40',
+        'l3_l4_credits_failed', 'credits_passed_y3y4',
+        'y3_creds_failed_str', 'l4_creds_y3y4_str',
+        'cf_flags',
     )
 
     def __init__(self):
@@ -281,6 +390,8 @@ class StudentInfo:
         self.plan           = None   # degree programme, e.g. 'MPhys(Hons) Physics'
         self.is_mphys_track  = False  # True if plan is MPhys or MMath (4-year course)
         self.is_study_abroad = False  # True if MPhys student with Y3 study abroad
+        self.is_pp           = False  # True if student has a professional placement unit
+        self.is_abroad       = False  # True if student has a year abroad unit
         self.units_passed   = None
         self.award          = None
         self.classification = None
@@ -316,9 +427,32 @@ class StudentInfo:
         self.phys2               = None   # previous Y2 mark (from L2CM trailing column)
         self.phys3               = None   # previous Y3 mark (from L3CM trailing column)
         self.credits_l3          = 0      # credits passed at level 3
-        self.credits_l4          = 0      # credits passed at level 4 (incl. levels 5 and 6)
+        self.credits_l4          = 0      # credits passed at level 4 (incl. level 6, excl. level 5)
         self.l3_l4_creds_passed  = None   # formatted string, e.g. '80 + 40 = 120'
+        self.credits_l3_first    = 0      # L3 credits (incl. excluded) with mark >= BOUNDARY_FIRST
+        self.credits_l3_upper2   = 0      # L3 credits (incl. excluded) with mark >= BOUNDARY_UPPER2
+        self.credits_l3_lower2   = 0      # L3 credits (incl. excluded) with mark >= BOUNDARY_LOWER2
+        self.credits_l3_third    = 0      # L3 credits (incl. excluded) with mark >= BOUNDARY_THIRD
+        self.credits_l3plus_first  = 0    # L3+ credits (incl. excluded) with mark >= BOUNDARY_FIRST
+        self.credits_l3plus_upper2 = 0    # L3+ credits (incl. excluded) with mark >= BOUNDARY_UPPER2
+        self.credits_l3plus_lower2 = 0    # L3+ credits (incl. excluded) with mark >= BOUNDARY_LOWER2
+        self.credits_l3plus_third  = 0    # L3+ credits (incl. excluded) with mark >= BOUNDARY_THIRD
         self.overall             = None   # weighted overall mark across years
+        self.project_mark        = None   # credit-weighted average project mark (rounded int), or None
+        self.project_creds       = 0      # total project credits
+        self.deg_class_alg       = None   # algorithmic degree classification, e.g. 'BSc 2.1'
+        self.deg_class_actual    = None   # actual degree classification (board may override)
+        self.borderline_for      = None   # class student is borderline for, e.g. '1', '2.1'
+        self.deg_class_rev       = None   # promotion note: 'P(A)' or 'P(B)', else None
+        self.y3creds_below40_not_excl   = None   # Y4 only: Y3 credits failed, not excluded (from Y3 credits sheet)
+        self.y3creds_below40_excl       = None   # Y4 only: Y3 credits failed with MCs, excluded
+        self.y3creds_l4_passed          = None   # Y4 only: L4 credits passed in Y3
+        self.y3creds_below40            = None   # Y4 only: total Y3 credits below 40 (not_excl + excl)
+        self.l3_l4_credits_failed       = None   # Y4 only: y3creds_below40 + L3+ credits failed in current Y4 grid
+        self.credits_passed_y3y4        = None   # Y4 only: L3+ credits passed over Y3+Y4 = 240 - l3_l4_credits_failed
+        self.y3_creds_failed_str        = None   # Y4 only: "not_excl/excl" for 'Y3 creds failed w/wo MCs' column
+        self.l4_creds_y3y4_str          = None   # Y4 only: "y3+y4=total" for 'L4 creds passed Y3+Y4' column
+        self.cf_flags                   = ''     # carry-forward notes from CF_FLAG_FILE; blank if not matched
 
     def exclude_units(self, classyear=None):
         """Set credits_taken/passed/excluded, creds_passed_taken, and unit flags.
@@ -422,16 +556,21 @@ class StudentInfo:
                 deferred_creds += unit.credits
 
             # --- copy through any unprocessed EN and mit_circs codes ---
+            # EN codes are prefixed before any action code already set (e.g. XN_X not X_XN).
+            en_passthrough = []
             for code in sorted(en_codes - used_en):
                 if code == 'R2':
-                    unit.output_code = _append_code(unit.output_code, '2nd att.')
+                    en_passthrough.append('2nd att.')
                     # R suffix means already capped externally; otherwise cap at 30 in yearmark.
                     if _mark_suffix(unit.mark) != 'R':
                         unit.capped = True
                 elif code == 'R1':
                     pass  # R1 = 1st-attempt resit; treat as normal, no output annotation
                 else:
-                    unit.output_code = _append_code(unit.output_code, code)
+                    en_passthrough.append(code)
+            if en_passthrough:
+                prefix = '_'.join(en_passthrough)
+                unit.output_code = _append_code(prefix, unit.output_code) if unit.output_code else prefix
             for code in sorted(mit_codes - used_mit - _PROCESSED_MIT_CODES):
                 unit.output_code = _append_code(unit.output_code, code)
 
@@ -537,28 +676,214 @@ class StudentInfo:
                 else:
                     self.status = 'R/BSc'
 
-    def calc_level_credits(self):
-        """Count passed credits at level 3 and level 4 (levels 5/6 treated as level 4).
+    def calc_bsc_class_y3mphys(self, classyear):
+        """Check Y3→Y4 progression for MPhys/MMath students (classyear 31/31m).
 
-        A unit is counted if its numeric mark is > PASS_MARK, regardless of exclusion codes.
-        Sets credits_l3, credits_l4, and l3_l4_creds_passed (e.g. '80+40=120').
+        Progression requires ALL of:
+          yearmark       > MPHYS_Y3_PROG_YEARMARK
+          overall        > MPHYS_Y3_PROG_OVERALL
+          credits_passed >= MPHYS_Y3_PROG_CREDITS
+
+        Students who already have status 'FAIL' are left unchanged.  Students
+        who fail any criterion are treated as BSc candidates: the equivalent
+        BSc classification is computed and written to self.status and the
+        trailing 'Award' column.  Status is prefixed with 'REVW ' when the
+        student is in a borderline zone; the Award value is never prefixed.
+        """
+        if self.status == 'FAIL':
+            return
+
+        try:
+            ym = float(self.yearmark)
+        except (TypeError, ValueError):
+            ym = -1.0
+        try:
+            ov = float(self.overall)
+        except (TypeError, ValueError):
+            ov = -1.0
+
+        phys_ok = math_ok = True
+        if classyear.endswith('m'):
+            try:
+                phys_ok = float(self.phys_yearmark) > MPHYS_Y3_PROG_PHYS_MATH_MARK
+            except (TypeError, ValueError):
+                phys_ok = False
+            try:
+                math_ok = float(self.math_yearmark) > MPHYS_Y3_PROG_PHYS_MATH_MARK
+            except (TypeError, ValueError):
+                math_ok = False
+
+        if (ym > MPHYS_Y3_PROG_YEARMARK
+                and ov > MPHYS_Y3_PROG_OVERALL
+                and (self.credits_passed or 0) >= MPHYS_Y3_PROG_CREDITS
+                and phys_ok and math_ok):
+            return   # meets all criteria — progress to Y4 unchanged
+
+        # Failed at least one criterion: compute BSc classification.
+        bsc_cy = '32m' if classyear.endswith('m') else '32'
+        self.calc_project_mark(bsc_cy)
+        self.calc_deg_class(bsc_cy)
+
+        bsc_class = self.deg_class_actual
+        if bsc_class is None:
+            return
+
+        if self.borderline_for is not None:
+            self.status = f'REVW {bsc_class}'
+            self.trailing['Award'] = None   # borderline: leave Award blank for board review
+        else:
+            self.status = bsc_class
+            self.trailing['Award'] = bsc_class
+
+    def apply_special_status(self, classyear):
+        """Override classification/status for interrupted, manual, or withdrawn students.
+
+        If the student's emplid is in interrupt_list, manual_list, or withdrawn_list:
+          - Progressing years: sets self.status to the label.
+          - Final years: sets deg_class_alg and deg_class_actual to the label.
+        In all cases clears resits, fail_reason, deg_class_rev, borderline_for,
+        and replaces every unit's output_code with the raw EN + mit_circs values
+        from the input (no computed action codes).
+        Returns True if the student matched a list, False otherwise.
+        """
+        eid = _norm_eid(self.emplid)
+        _norm = lambda lst: {_norm_eid(e) for e in lst}
+        if   eid in _norm(interrupt_list):
+            label = 'Interrupt'
+        elif eid in _norm(manual_list):
+            label = 'Manual'
+        elif eid in _norm(withdrawn_list):
+            label = 'Withdrawn'
+        else:
+            return False
+
+        if classyear in FINAL_CLASSYEARS:
+            self.deg_class_alg    = label
+            self.deg_class_actual = label
+            self.deg_class_rev    = None
+            self.borderline_for   = None
+        else:
+            self.status = label
+
+        self.resits   = None
+        if label == 'Withdrawn':
+            notes_text = self.cf_flags or self.trailing.get('Notes') or ''
+            self.fail_reason = ('' if 'withdrawn' in str(notes_text).lower()
+                                else 'Withdrawn')
+        else:
+            self.fail_reason = ''
+
+        for unit in self.units:
+            raw = ' '.join(
+                str(c).strip() for c in (unit.en, unit.mit_circs) if c
+            )
+            unit.output_code = raw or None
+
+        return True
+
+    def detect_intercal(self, classyear):
+        """Detect professional placement (PP) or year-abroad students with absent marks.
+
+        Scans every unit for PP_MODULES (PHYS30810/PHYS40810) and ABROAD_MODULES
+        (PHYS31000/PHYS41000), setting self.is_pp and self.is_abroad regardless of
+        whether marks are present.
+
+        If any matched unit has an absent mark (blank, -1, or non-numeric such as
+        'P'/'F'), applies 'Intercal' status and performs the same output blanking
+        as apply_special_status (resits/fail_reason cleared, unit output codes
+        replaced by raw EN + mit_circs values).
+        """
+        pp_absent     = False
+        abroad_absent = False
+
+        for unit in self.units:
+            code = (unit.coursename or '').strip()
+            if code in PP_MODULES:
+                self.is_pp = True
+                if _mark_is_absent(unit.mark):
+                    pp_absent = True
+            if code in ABROAD_MODULES:
+                self.is_abroad = True
+                if _mark_is_absent(unit.mark):
+                    abroad_absent = True
+
+        if not (pp_absent or abroad_absent):
+            return   # marks are present — process normally
+
+        if classyear in FINAL_CLASSYEARS:
+            self.deg_class_alg    = 'Intercal'
+            self.deg_class_actual = 'Intercal'
+            self.deg_class_rev    = None
+            self.borderline_for   = None
+        else:
+            self.status = 'Intercal'
+
+        self.resits      = None
+        self.fail_reason = ''
+
+        for unit in self.units:
+            raw = ' '.join(str(c).strip() for c in (unit.en, unit.mit_circs) if c)
+            unit.output_code = raw or None
+
+    def calc_level_credits(self):
+        """Count passed credits at level 3 and level 4 (level 6 treated as level 4; level 5 excluded).
+
+        Also tallies L3 credits at each degree-class boundary (mark >= boundary), including
+        excluded units, for use in degree classification and borderline promotion.
+        All counts ignore exclusion status — only the numeric mark is tested.
+        Sets credits_l3, credits_l4, l3_l4_creds_passed, and credits_l3_first/upper2/lower2/third.
         """
         l3 = 0
         l4 = 0
-        for idx, unit in enumerate(self.units):
+        l3_first  = 0
+        l3_upper2 = 0
+        l3_lower2 = 0
+        l3_third  = 0
+        l3p_first  = 0
+        l3p_upper2 = 0
+        l3p_lower2 = 0
+        l3p_third  = 0
+        for unit in self.units:
             if unit.credits is None or unit.module is None:
                 continue
             mark_num = _numeric_mark(unit.mark)
-            if mark_num is None or not (mark_num > PASS_MARK):
+            if mark_num is None:
                 continue
             level = _course_level(unit.coursename or unit.module)
             if level == 3:
-                l3 += unit.credits
-            elif level in (4, 5, 6):
-                l4 += unit.credits
-        self.credits_l3         = l3
-        self.credits_l4         = l4
-        self.l3_l4_creds_passed = f"{l3} + {l4} = {l3 + l4}"
+                if mark_num > PASS_MARK:
+                    l3 += unit.credits
+                if mark_num >= BOUNDARY_FIRST:
+                    l3_first += unit.credits
+                if mark_num >= BOUNDARY_UPPER2:
+                    l3_upper2 += unit.credits
+                if mark_num >= BOUNDARY_LOWER2:
+                    l3_lower2 += unit.credits
+                if mark_num >= BOUNDARY_THIRD:
+                    l3_third += unit.credits
+            elif level in (4, 6):
+                if mark_num > PASS_MARK:
+                    l4 += unit.credits
+            if level in (3, 4, 5, 6):
+                if mark_num >= BOUNDARY_FIRST:
+                    l3p_first += unit.credits
+                if mark_num >= BOUNDARY_UPPER2:
+                    l3p_upper2 += unit.credits
+                if mark_num >= BOUNDARY_LOWER2:
+                    l3p_lower2 += unit.credits
+                if mark_num >= BOUNDARY_THIRD:
+                    l3p_third += unit.credits
+        self.credits_l3           = l3
+        self.credits_l4           = l4
+        self.l3_l4_creds_passed   = f"{l3} + {l4} = {l3 + l4}"
+        self.credits_l3_first     = l3_first
+        self.credits_l3_upper2    = l3_upper2
+        self.credits_l3_lower2    = l3_lower2
+        self.credits_l3_third     = l3_third
+        self.credits_l3plus_first  = l3p_first
+        self.credits_l3plus_upper2 = l3p_upper2
+        self.credits_l3plus_lower2 = l3p_lower2
+        self.credits_l3plus_third  = l3p_third
 
     def calc_overall(self, classyear):
         """Set self.overall to the weighted overall mark across available year marks.
@@ -614,6 +939,348 @@ class StudentInfo:
         total_weight = sum(w for w, _ in valid)
         weighted_sum = sum(w * m for w, m in valid)
         self.overall = math.floor(weighted_sum / total_weight * 10 + 0.5) / 10
+
+    def calc_project_mark(self, classyear):
+        """Set project_mark (credit-weighted average, rounded int) and project_creds.
+
+        Handles all final-year programmes:
+          BSc / BSc M+P (32/32m) : BSc dissertation (any BSC_DISSERTATION_MODULES code)
+          MPhys (4)              : PHYS40181 (S1) and/or PHYS40182 (S2);
+                                   PHIL40000 for Physics with Philosophy students
+          MMath (4m)             : MATH40011 and/or MATH40022
+
+        If two project units exist they are combined as a credit-weighted average.
+        project_mark is stored as a rounded integer (matching the 2025 convention).
+        """
+        base = classyear.rstrip('m')
+        if base not in ('32', '4'):
+            return
+
+        def _find(name):
+            """Return (numeric_mark, credits) for the first unit matching *name*."""
+            for u in self.units:
+                if (u.coursename or u.module or '') == name:
+                    m = _numeric_mark(u.mark)
+                    return (m, u.credits)
+            return (None, None)
+
+        p1m = p1c = None
+        p2m = p2c = None
+
+        if base == '32':
+            # BSc dissertation — try PHYS dissertation codes first, then MATH30022 fallback
+            for code in BSC_DISSERTATION_MODULES:
+                m, c = _find(code)
+                if m is not None:
+                    p1m, p1c = m, c
+                    break
+            if p1m is None:
+                p1m, p1c = _find('MATH30022')
+
+        else:
+            # MPhys standard projects (S1 + S2)
+            p1m, p1c = _find('PHYS40181')
+            p2m, p2c = _find('PHYS40182')
+
+            # Physics with Philosophy: PHIL40000 essay (10 cr) fills whichever slot is empty
+            if p1m is None:
+                p1m, p1c = _find('PHIL40000')
+            elif p2m is None:
+                m, c = _find('PHIL40000')
+                if m is not None:
+                    p2m, p2c = m, c
+
+            # MMath: MATH40011 (S1) and/or MATH40022 (S2)
+            if p1m is None:
+                p1m, p1c = _find('MATH40011')
+            if p2m is None:
+                m, c = _find('MATH40022')
+                if m is not None:
+                    p2m, p2c = m, c
+
+        # Combine into a single credit-weighted project mark
+        if p1m is not None and p2m is not None:
+            total_c = (p1c or 0) + (p2c or 0)
+            raw = ((p1m * (p1c or 0)) + (p2m * (p2c or 0))) / total_c if total_c else (p1m + p2m) / 2
+            self.project_mark  = round(raw + 0.000001)
+            self.project_creds = total_c
+        elif p1m is not None:
+            self.project_mark  = round(p1m + 0.000001)
+            self.project_creds = p1c or 0
+        elif p2m is not None:
+            self.project_mark  = round(p2m + 0.000001)
+            self.project_creds = p2c or 0
+        else:
+            self.project_mark  = None
+            self.project_creds = 0
+
+    def calc_deg_class(self, classyear):
+        """Set deg_class_alg, deg_class_actual, borderline_for, and deg_class_rev.
+
+        For BSc (classyear 32/32m):
+          Upper classes (1/2.1/2.2): overall mark >= boundary AND >= BSC_L3_CREDITS_UPPER
+            passed L3 credits, including all MUST_PASS units (lab and dissertation).
+          Short-credit rule: if L3 credits are in [BSC_L3_CREDITS_THIRD, BSC_L3_CREDITS_UPPER)
+            and MUST_PASS are satisfied, award one class below the mark-indicated class.
+          3rd class: overall >= BOUNDARY_THIRD AND >= BSC_L3_CREDITS_THIRD L3 credits
+            including MUST_PASS.
+          Ordinary 3rd ('BSc 3 ord'): >= BSC_L3_CREDITS_THIRD L3 credits but fails
+            proper-3rd criteria.
+          BSc Fail: otherwise.
+
+          Borderline zones (BSc only):
+            2% below each upper-class boundary (BSC_BORDERLINE_UPPER), 3% below the
+            3rd-class boundary (BSC_BORDERLINE_THIRD).  Borderline students are recorded
+            in self.borderline_for (e.g. '1', '2.1').
+            Algorithm A: if >BSC_PROMO_A_CREDITS L3 credits at the target boundary
+              mark, promote to the higher class; record 'P(A)' in deg_class_rev.
+            Algorithm B (tried only if A fails): if >BSC_PROMO_B_CREDITS L3 credits
+              at the target boundary mark, AND the BSc dissertation mark is at the target
+              level, AND yearmark > overall; promote and record 'P(B)'.
+
+        For MPhys (classyear 4) / MMath (classyear 4m):
+          Class from the overall mark boundary (1/2.1/2.2 — there is no 3rd class)
+          requiring >= MPHYS_CREDITS_FULL credits passed at level 3+ over Y3+Y4
+          (= MPHYS_CREDITS_TOTAL - l3_l4_credits_failed) AND a passed project.
+          Short on credits by up to 20 (>= MPHYS_CREDITS_SHORT) with a passed project
+          drops the class one level.  Borderline promotion (within 2% below a
+          boundary) lifts a student one class if they passed >= Y4_PROMO_CREDITS
+          Y4 credits at level 3+ at the target boundary mark.  A student who fails the
+          2nd-class requirements (overall < 2.2 boundary and not promoted, or short
+          at 2.2, or project failed) reverts to a BSc degree based on years 1–3,
+          awarded on the overall mark boundary only.
+        """
+        base = classyear.rstrip('m')
+        if base == '32':
+            prefix = 'BSc'
+        elif classyear == '4':
+            prefix = 'MPhys'
+        elif classyear == '4m':
+            prefix = 'MMath'
+        else:
+            return
+
+        try:
+            overall = float(self.overall)
+            if overall < 0:
+                return
+        except (TypeError, ValueError):
+            return
+
+        if base == '32':
+            # has_req: every MUST_PASS unit in this student's list is passed
+            has_req = all(
+                _numeric_mark(u.mark) is not None and _numeric_mark(u.mark) > PASS_MARK
+                for u in self.units
+                if (u.coursename or u.module or '') in MUST_PASS
+            )
+            l3 = self.credits_l3 + self.credits_l4   # L3+ passed credits for classification
+
+            if overall >= BOUNDARY_FIRST and l3 >= BSC_L3_CREDITS_UPPER and has_req:
+                cls = '1'
+            elif overall >= BOUNDARY_FIRST and l3 >= BSC_L3_CREDITS_THIRD and has_req:
+                cls = '2.1'   # short on L3 credits by up to 20 → one below 1st
+            elif overall >= BOUNDARY_UPPER2 and l3 >= BSC_L3_CREDITS_UPPER and has_req:
+                cls = '2.1'
+            elif overall >= BOUNDARY_UPPER2 and l3 >= BSC_L3_CREDITS_THIRD and has_req:
+                cls = '2.2'   # short on L3 credits by up to 20 → one below 2.1
+            elif overall >= BOUNDARY_LOWER2 and l3 >= BSC_L3_CREDITS_UPPER and has_req:
+                cls = '2.2'
+            elif overall >= BOUNDARY_THIRD and l3 >= BSC_L3_CREDITS_THIRD and has_req:
+                cls = '3'     # covers one-below-2.2 (short credits) and proper 3rd
+            elif l3 >= BSC_L3_CREDITS_THIRD:
+                cls = '3 ord'
+            else:
+                cls = 'Fail'
+
+            # --- borderline detection and promotion ---
+            # Each zone maps (target class, lower bound, upper bound, pre-stored L3+ attr).
+            # L3+ credit counts include excluded units (computed in calc_level_credits).
+            # XB/BX in the BZ column extends every zone's lower bound by a further 1.0.
+            cls_before_promo = cls   # base classification before any borderline promotion
+            cls_alg = cls_before_promo
+            bz_codes = _split_codes(self.bz)
+            bz_extra = 1.0 if ('XB' in bz_codes or 'BX' in bz_codes) else 0.0
+            _BORDERLINE_ZONES = (
+                ('1',   BOUNDARY_FIRST  - BSC_BORDERLINE_UPPER, BOUNDARY_FIRST,  'credits_l3plus_first'),
+                ('2.1', BOUNDARY_UPPER2 - BSC_BORDERLINE_UPPER, BOUNDARY_UPPER2, 'credits_l3plus_upper2'),
+                ('2.2', BOUNDARY_LOWER2 - BSC_BORDERLINE_UPPER, BOUNDARY_LOWER2, 'credits_l3plus_lower2'),
+                ('3',   BOUNDARY_THIRD  - BSC_BORDERLINE_THIRD, BOUNDARY_THIRD,  'credits_l3plus_third'),
+            )
+            for target_cls, lo, hi, l3_attr in _BORDERLINE_ZONES:
+                if lo - bz_extra <= overall < hi:
+                    self.borderline_for = target_cls
+                    l3_above = getattr(self, l3_attr)
+
+                    if l3_above >= BSC_PROMO_A_CREDITS:
+                        cls = target_cls
+                        self.deg_class_rev = 'P(A)'
+                    else:
+                        # Algorithm B: project at target level AND yearmark > overall
+                        try:
+                            ym = float(self.yearmark)
+                        except (TypeError, ValueError):
+                            ym = -1.0
+                        if (l3_above >= BSC_PROMO_B_CREDITS
+                                and self.project_mark is not None and self.project_mark >= hi
+                                and ym > overall):
+                            cls = target_cls
+                            self.deg_class_rev = 'P(B)'
+                        else:
+                            # Record why neither algorithm promoted the student.
+                            # 'CR' is always present (A's credit threshold not met).
+                            # If B's credit threshold was met, also report B's other failures.
+                            reasons = ['CR']
+                            if l3_above >= BSC_PROMO_B_CREDITS:
+                                if self.project_mark is None or self.project_mark < hi:
+                                    reasons.append('Proj.')
+                                if ym >= 0 and not (ym > overall):
+                                    reasons.append('marks')
+                            self.deg_class_rev = '/'.join(reasons)
+
+                            # --- promotion_x: informational, does not change degree class ---
+                            # Targets ONE CLASS ABOVE the base (nominal) classification,
+                            # using a reduced credit threshold of (2/3) of assessed credits
+                            # (non-excluded, with a mark), capped at BSC_PROMO_A_CREDITS.
+                            _X_ONE_ABOVE = {
+                                '3 ord': ('3',   'credits_l3plus_third',  BOUNDARY_THIRD),
+                                '3':     ('2.2', 'credits_l3plus_lower2', BOUNDARY_LOWER2),
+                                '2.2':   ('2.1', 'credits_l3plus_upper2', BOUNDARY_UPPER2),
+                                '2.1':   ('1',   'credits_l3plus_first',  BOUNDARY_FIRST),
+                            }
+                            if cls_before_promo in _X_ONE_ABOVE:
+                                x_cls, x_attr, x_hi = _X_ONE_ABOVE[cls_before_promo]
+                                l3_above_x = getattr(self, x_attr)
+                                assessed_creds = sum(
+                                    u.credits for u in self.units
+                                    if u.credits is not None
+                                    and _numeric_mark(u.mark) is not None
+                                    and not u.excluded
+                                )
+                                threshold_x = min(assessed_creds * 2 / 3,
+                                                  float(BSC_PROMO_A_CREDITS))
+                                if l3_above_x >= threshold_x:
+                                    if (self.project_mark is not None
+                                            and self.project_mark >= x_hi
+                                            and ym > overall):
+                                        self.deg_class_rev = 'P(B_X)'
+                                    else:
+                                        self.deg_class_rev = 'P(A_X)'
+                    break
+
+            # --- fail reason for BSc Fail ---
+            if cls == 'Fail':
+                reasons = []
+                if overall < BOUNDARY_THIRD:
+                    reasons.append('< 40% overall')
+                if l3 < BSC_L3_CREDITS_THIRD:
+                    reasons.append(f'< {BSC_L3_CREDITS_THIRD} credits at L3+')
+                if not has_req:
+                    reasons.append('Failed lab')
+                self.fail_reason = ' / '.join(reasons)
+        else:
+            # ----- MPhys (4) / MMath (4m) -----
+            # Credits passed at level 3+ over Y3+Y4 (incl. project), out of 240.
+            credits = self.credits_passed_y3y4
+            if credits is None:
+                credits = MPHYS_CREDITS_TOTAL - (self.l3_l4_credits_failed or 0)
+                self.credits_passed_y3y4 = credits
+            project_ok = self.project_mark is not None and self.project_mark > PASS_MARK
+
+            # Base honours class from the overall mark boundary plus the credit and
+            # project requirement.  Short on credits by up to 20 (and project passed)
+            # drops the class one level.  cls is None ⇒ no honours ⇒ revert to BSc.
+            cls = None
+            if project_ok:
+                if overall >= BOUNDARY_FIRST:
+                    if credits >= MPHYS_CREDITS_FULL:
+                        cls = '1'
+                    elif credits >= MPHYS_CREDITS_SHORT:
+                        cls = '2.1'   # short on credits → one below 1st
+                elif overall >= BOUNDARY_UPPER2:
+                    if credits >= MPHYS_CREDITS_FULL:
+                        cls = '2.1'
+                    elif credits >= MPHYS_CREDITS_SHORT:
+                        cls = '2.2'   # short on credits → one below 2.1
+                elif overall >= BOUNDARY_LOWER2:
+                    if credits >= MPHYS_CREDITS_FULL:
+                        cls = '2.2'
+                    # short at 2.2 → one below 2.2 → no 3rd class → revert to BSc
+
+            # ----- borderline promotion (analogous to BSc algorithm A) -----
+            # A borderline student (overall within 2% below a class boundary) is
+            # promoted to that class if they passed >= Y4_PROMO_CREDITS Y4
+            # credits at level 3+ achieving at least the target boundary mark.
+            # credits_l3plus_* are computed from the current (Y4) grid only.
+            # XB/BX in the BZ column widens every band by a further 1.0.
+            cls_alg = cls  # pre-promotion class (None ⇒ would revert to BSc)
+            bz_codes = _split_codes(self.bz)
+            bz_extra = 1.0 if ('XB' in bz_codes or 'BX' in bz_codes) else 0.0
+            _MPHYS_ZONES = (
+                ('1',   BOUNDARY_FIRST  - BSC_BORDERLINE_UPPER, BOUNDARY_FIRST,  'credits_l3plus_first'),
+                ('2.1', BOUNDARY_UPPER2 - BSC_BORDERLINE_UPPER, BOUNDARY_UPPER2, 'credits_l3plus_upper2'),
+                ('2.2', BOUNDARY_LOWER2 - BSC_BORDERLINE_UPPER, BOUNDARY_LOWER2, 'credits_l3plus_lower2'),
+            )
+            for target_cls, lo, hi, l3_attr in _MPHYS_ZONES:
+                if lo - bz_extra <= overall < hi:
+                    self.borderline_for = target_cls
+                    y4_l3plus_at_target = getattr(self, l3_attr)
+                    if (project_ok and credits >= MPHYS_CREDITS_SHORT
+                            and y4_l3plus_at_target >= Y4_PROMO_CREDITS):
+                        cls = target_cls
+                        self.deg_class_rev = 'P(A)'
+                    else:
+                        self.deg_class_rev = 'CR'
+                    break
+
+            if cls is None:
+                # Revert to a BSc degree based on the first three years (Y1=10,
+                # Y2=30, Y3=60), awarded on the overall mark boundary only.
+                prefix = 'BSc'
+                bsc_candidates = [(10, self.phys1), (30, self.phys2), (60, self.phys3)]
+                bsc_valid = []
+                for weight, mark in bsc_candidates:
+                    try:
+                        f = float(mark)
+                        if f >= 0:
+                            bsc_valid.append((weight, f))
+                    except (TypeError, ValueError):
+                        pass
+                if bsc_valid:
+                    tw = sum(w for w, _ in bsc_valid)
+                    bsc_overall = math.floor(sum(w * m for w, m in bsc_valid) / tw * 10 + 0.5) / 10
+                else:
+                    bsc_overall = -1.0
+                if bsc_overall >= BOUNDARY_FIRST:
+                    cls = '1'
+                elif bsc_overall >= BOUNDARY_UPPER2:
+                    cls = '2.1'
+                elif bsc_overall >= BOUNDARY_LOWER2:
+                    cls = '2.2'
+                elif bsc_overall >= BOUNDARY_THIRD:
+                    cls = '3'
+                else:
+                    cls = 'Fail'
+
+                # Explain why the MPhys/MMath was not awarded
+                fail_reasons = []
+                if not project_ok:
+                    fail_reasons.append('Failed project')
+                if overall < BOUNDARY_LOWER2:
+                    fail_reasons.append(f'<{int(BOUNDARY_LOWER2)}% overall')
+                else:
+                    threshold = (MPHYS_CREDITS_SHORT if overall >= BOUNDARY_UPPER2
+                                 else MPHYS_CREDITS_FULL)
+                    if credits < threshold:
+                        fail_reasons.append(
+                            f'<{threshold} L4 credits ({credits}) passed'
+                        )
+                self.fail_reason = ' / '.join(fail_reasons)
+
+        self.deg_class_actual = f'{prefix} {cls}'
+        self.deg_class_alg = (f'{prefix} {cls_alg}'
+                              if self.deg_class_rev in ('P(A)', 'P(B)')
+                              else self.deg_class_actual)
 
     def calc_referrals(self, classyear):
         """Determine compensation and referrals for non-final-year students.
@@ -1040,13 +1707,13 @@ _COL_WIDTHS = {
     'Emplid':                    9.00,
     'Name':                     12.00,
     'Plan':                     17.00,
-    '_unit':                     7.50,
-    '_code':                     7.50,
+    '_unit':                     7.00,
+    '_code':                     8.00,
     'Creds Passed/Taken':       16.00,
     'Year Mark':                9.00,
     'Phys Year Mark':           12.00,
     'Math Year Mark':           12.00,
-    'Status':                   9.00,
+    'Status':                   11.00,
     'Fail reason':              22.00,
     'Resits':                   50.00,
     'Notes':                    50.00,
@@ -1123,9 +1790,14 @@ _TRAILING_ATTR = {
     'Status':                'status',
     'Fail reason':           'fail_reason',
     'Resits':                'resits',
-    'L3/L4 creds passed':    'l3_l4_creds_passed',
-    'L4 creds passed Y3+Y4': 'l3_l4_creds_passed',
+    'BZ':                    'bz',
+    'L3/L4 creds passed':       'l3_l4_creds_passed',
+    'L4 creds passed Y3+Y4':    'l4_creds_y3y4_str',
+    'Y3 creds failed w/wo MCs': 'y3_creds_failed_str',
     'Overall':               'overall',
+    'Deg Class Alg':         'deg_class_alg',
+    'Deg Class Rev':         'deg_class_rev',
+    'Deg Class Actual':      'deg_class_actual',
 }
 
 # Excel number formats applied to trailing columns that hold computed floats.
@@ -1234,6 +1906,8 @@ def write_students(students, outpath, classyear):
         for j, tname in enumerate(trailer_names):
             attr  = _TRAILING_ATTR.get(tname)
             value = getattr(s, attr) if attr else s.trailing.get(tname)
+            if tname == 'Notes' and s.cf_flags:
+                value = s.cf_flags
             cell  = _c(info_row, t_start + j, value)
             fmt   = _TRAILING_FORMAT.get(tname)
             if fmt:
@@ -1282,13 +1956,260 @@ def write_students(students, outpath, classyear):
         ws.merge_cells(start_row=row, start_column=c1, end_row=row, end_column=c2)
 
     wb.save(outpath)
-    print(f"  Written {len(students)} students "
-          f"({n_units} units, {len(trailer_names)} trailing cols) → {outpath}")
+
+
+# ===========================================================================
+# Y3 credits supplementary data (for Y4 degree classification)
+# ===========================================================================
+
+def _y3cr_find_col(headers, pred, desc):
+    """Return the first column index whose normalised header satisfies pred, or None."""
+    for i, h in enumerate(headers):
+        if pred(h.lower()):
+            return i
+    print(f"  WARNING: Y3 credits column '{desc}' not found")
+    return None
+
+
+def read_y3_credits(filepath):
+    """Read supplementary Y3 credit data for Y4 students from *filepath*.
+
+    Looks for a sheet whose name contains 'summ' (case-insensitive); falls back
+    to the first sheet with a warning if none is found.  The header row is
+    auto-detected as the first row (within the first 10) whose column 0 contains
+    'emplid'.
+
+    Searches column headers for:
+      y3creds_below40_not_excl : contains 'not' and 'excluded', NOT 'pass'
+      y3creds_below40_excl     : contains 'excluded', NOT 'not' or 'pass'
+      y3creds_l4_passed        : contains 'l4' and 'pass'
+
+    Returns a dict  {emplid_str: {'y3creds_below40_not_excl': int|None,
+                                  'y3creds_below40_excl':     int|None,
+                                  'y3creds_l4_passed':        int|None}}
+    or an empty dict if the file is missing or unreadable.
+    """
+    try:
+        xl = pd.ExcelFile(filepath)
+    except FileNotFoundError:
+        print(f"  WARNING: Y3 credits file not found — {filepath}")
+        return {}
+    except Exception as exc:
+        print(f"  WARNING: could not read Y3 credits file {filepath} — {exc}")
+        return {}
+
+    sheet = next((s for s in xl.sheet_names if 'summ' in s.lower()), None)
+    if sheet is None:
+        print(f"  WARNING: no summary sheet found in {filepath}; using first sheet")
+        sheet = xl.sheet_names[0]
+
+    try:
+        df = xl.parse(sheet, header=None, dtype=object)
+    except Exception as exc:
+        print(f"  WARNING: could not read sheet '{sheet}' from {filepath} — {exc}")
+        return {}
+
+    header_row = None
+    for i in range(min(10, len(df))):
+        if 'emplid' in str(df.iloc[i, 0]).lower():
+            header_row = i
+            break
+    if header_row is None:
+        print(f"  WARNING: could not find header row in sheet '{sheet}' of {filepath}")
+        return {}
+
+    headers = [_norm_header(df.iloc[header_row, c]) for c in range(len(df.columns))]
+
+    col_not_excl = _y3cr_find_col(
+        headers,
+        lambda h: 'not' in h and 'excluded' in h and 'pass' not in h,
+        'Y3 fails not excluded',
+    )
+    col_excl = _y3cr_find_col(
+        headers,
+        lambda h: 'excluded' in h and 'not' not in h and 'pass' not in h,
+        'Y3 fails with MCs excluded',
+    )
+    col_l4 = _y3cr_find_col(
+        headers,
+        lambda h: 'l4' in h.lower() and 'pass' in h.lower(),
+        'L4 passed in Y3',
+    )
+
+    def _int_val(row, col):
+        if col is None:
+            return None
+        val = row.iloc[col]
+        if pd.isna(val):
+            return None
+        try:
+            return int(float(str(val).strip()))
+        except (ValueError, TypeError):
+            return None
+
+    def _norm_emplid(v):
+        try:
+            return str(int(float(str(v).strip())))
+        except (ValueError, TypeError):
+            return str(v).strip()
+
+    result = {}
+    for _, row in df.iloc[header_row + 1:].iterrows():
+        raw = row.iloc[0]
+        if pd.isna(raw):
+            continue
+        eid = _norm_emplid(raw)
+        result[eid] = {
+            'y3creds_below40_not_excl': _int_val(row, col_not_excl),
+            'y3creds_below40_excl':     _int_val(row, col_excl),
+            'y3creds_l4_passed':        _int_val(row, col_l4),
+        }
+
+    return result
+
+def read_cf_flags(filepath):
+    """Read carry-forward notes from all sheets of *filepath*.
+
+    Each sheet must have a header row and at least three columns:
+      col 0 — student emplid
+      col 1 — student name (ignored)
+      col 2 — notes text to store in StudentInfo.cf_flags
+
+    All sheets are read and combined; if an emplid appears on more than one
+    sheet the notes are joined with '; '.
+
+    Returns a dict {emplid_str: notes_str}, or an empty dict if the file is
+    missing, disabled (None), or unreadable.
+    """
+    if not filepath:
+        return {}
+    try:
+        xl = pd.ExcelFile(filepath)
+    except FileNotFoundError:
+        print(f"  WARNING: CF flag file not found — {filepath}")
+        return {}
+    except Exception as exc:
+        print(f"  WARNING: could not read CF flag file {filepath} — {exc}")
+        return {}
+
+    result = {}
+    for sheet in xl.sheet_names:
+        try:
+            df = xl.parse(sheet, header=0, dtype=object)
+        except Exception:
+            continue
+        for _, row in df.iterrows():
+            raw = row.iloc[0]
+            if pd.isna(raw):
+                continue
+            try:
+                eid = str(int(float(str(raw).strip())))
+            except (ValueError, TypeError):
+                eid = str(raw).strip()
+            notes_raw = row.iloc[2] if len(row) > 2 else None
+            if pd.isna(notes_raw):
+                continue
+            notes = str(notes_raw).strip()
+            if eid and notes:
+                result[eid] = f"{result[eid]}; {notes}" if eid in result else notes
+
+    return result
 
 
 # ===========================================================================
 # Argument parsing
 # ===========================================================================
+
+_REPORT_LABEL_W = 25   # label column width (padded with dots) in the report
+
+def _lbl(text):
+    """Return *text* left-padded with dots to _REPORT_LABEL_W characters."""
+    return f"{text:.<{_REPORT_LABEL_W}}"
+
+
+def _stats_lines(students, cy):
+    """Return a list of formatted statistics lines for one processed classyear."""
+    n = len(students)
+    if not n:
+        return ['  (no students)']
+
+    _GRADE_ORDER  = {'1': 0, '2.1': 1, '2.2': 2, '3': 3, '3 ord': 4, 'Fail': 5}
+    _PREFIX_ORDER = {'MPhys': 0, 'MMath': 0, 'BSc': 1}
+    _STATUS_ORDER = {
+        'ACTV': 0, 'A/D': 1, 'REVW': 2, 'R/X': 3,
+        'R/BSc': 4, 'REVW_BSc': 5, 'FAIL': 99,
+    }
+
+    def _deg_key(cls):
+        parts = cls.split(' ', 1)
+        prefix, grade = (parts[0], parts[1]) if len(parts) == 2 else ('', cls)
+        return (_PREFIX_ORDER.get(prefix, 2), _GRADE_ORDER.get(grade, 9))
+
+    def _status_key(st):
+        if st.startswith('BSc') or st.startswith('REVW BSc'):
+            grade = st.rsplit(' ', 1)[-1]
+            return (50, _GRADE_ORDER.get(grade, 9))
+        return (_STATUS_ORDER.get(st, 40), 0)
+
+    lines = []
+
+    if cy in FINAL_CLASSYEARS:
+        counts  = {}
+        promo_a = promo_b = 0
+        marks   = []
+        for s in students:
+            cls = s.deg_class_actual or '?'
+            counts[cls] = counts.get(cls, 0) + 1
+            rev = s.deg_class_rev or ''
+            if 'P(A)' in rev and '_X' not in rev:
+                promo_a += 1
+            elif 'P(B)' in rev and '_X' not in rev:
+                promo_b += 1
+            try:
+                v = float(s.overall)
+                if v >= 0:
+                    marks.append(v)
+            except (TypeError, ValueError):
+                pass
+
+        lines.append('  Degree classification:')
+        for cls in sorted(counts, key=_deg_key):
+            pct = counts[cls] / n * 100
+            lines.append(f"    {cls:<14}: {counts[cls]:3d}  ({pct:5.1f}%)")
+        if promo_a or promo_b:
+            lines.append(f"    Promoted: P(A)={promo_a}, P(B)={promo_b}")
+        mark_label = 'Overall mark'
+    else:
+        counts = {}
+        marks  = []
+        for s in students:
+            st = s.status or 'ACTV'
+            counts[st] = counts.get(st, 0) + 1
+            try:
+                v = float(s.yearmark)
+                if v >= 0:
+                    marks.append(v)
+            except (TypeError, ValueError):
+                pass
+
+        lines.append('  Status:')
+        for st in sorted(counts, key=_status_key):
+            pct = counts[st] / n * 100
+            lines.append(f"    {st:<18}: {counts[st]:3d}  ({pct:5.1f}%)")
+        mark_label = 'Year mark'
+
+    lines.append(f"  Total students: {n}")
+    if marks:
+        avg = sum(marks) / len(marks)
+        med = statistics.median(marks)
+        lines.append(
+            f"  {mark_label}: avg {avg:.1f},  median {med:.1f},"
+            f"  min {min(marks):.1f},  max {max(marks):.1f}"
+            + (f"  (n={len(marks)}, {n - len(marks)} without mark)"
+               if len(marks) < n else f"  (n={len(marks)})")
+        )
+    return lines
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -1302,6 +2223,16 @@ def parse_args():
             "Class year to process: 1, 2, 31, 32, 4 "
             "(append m/M for Maths+Physics equivalent). "
             "Use 'all' or '*' to run all 10 (default)."
+        )
+    )
+    parser.add_argument(
+        '--sort', '--sort_output',
+        dest='sort_output',
+        action='store_true',
+        default=SORT_OUTPUT,
+        help=(
+            "Sort output descending by mark: yearmark for progressing students, "
+            "overall for final-year students. Default: %(default)s."
         )
     )
     return parser.parse_args()
@@ -1329,34 +2260,59 @@ def main():
     args = parse_args()
     classyears = resolve_classyears(args.classyear)
 
-    multi = len(classyears) > 1
+    multi  = len(classyears) > 1
     errors = 0
+    buf    = []   # collects every output line for the report file
+
+    def _out(line=''):
+        print(line)
+        buf.append(line)
+
+    # ---- header ----
+    _out(f"PyAssess AY{AY}  —  processing {len(classyears)} classyear(s)")
+    _out('=' * 56)
+
+    # ---- supplementary data files ----
+    y3_credits = {}
+    if any(cy in ('4', '4m') for cy in classyears):
+        y3cr_path = os.path.join(INDIR, Y3_CREDITS_FILENAME)
+        y3_credits = read_y3_credits(y3cr_path)
+        if y3_credits:
+            _out(f"  {_lbl('Y3 credit data')}: {y3cr_path}  ({len(y3_credits)} students)")
+
+    cf_flags = read_cf_flags(CF_FLAG_FILE)
+    if cf_flags:
+        _out(f"  {_lbl('Carry-forward notes')}: {CF_FLAG_FILE}  ({len(cf_flags)} students)")
 
     for cy in classyears:
         infile, outfile = CLASSYEAR_FILES[cy]
         inpath  = os.path.join(INDIR,  infile)
         outpath = os.path.join(OUTDIR, outfile)
-        print(f"classyear {cy:>3s}: reading {inpath} ...")
+        desc    = _CY_DESC.get(cy, cy)
+
+        _out()
+        _out(f"--- {desc}  (classyear {cy}) ---")
 
         try:
             students = read_students(inpath)
         except FileNotFoundError:
-            print(f"  WARNING: file not found — {inpath}")
+            _out(f"  WARNING: file not found — {inpath}")
             errors += 1
             if multi:
                 continue
             else:
                 sys.exit(1)
         except Exception as exc:
-            print(f"  WARNING: could not read {inpath} — {exc}")
+            _out(f"  WARNING: could not read {inpath} — {exc}")
             errors += 1
             if multi:
                 continue
             else:
                 sys.exit(1)
 
-        print(f"             {len(students)} students, "
-              f"{len(students[0].units)} units each")
+        n_units = len(students[0].units) if students else 0
+        _out(f"  {_lbl('Input')}: {inpath}")
+        _out(f"  {_lbl('Students')}: {len(students)} students, {n_units} units each")
         prev_cols = _PREV_YEARMARK_COLS.get(cy, {})
         for s in students:
             for attr, col_key in prev_cols.items():
@@ -1372,18 +2328,93 @@ def main():
             if cy in _LEVEL_CREDIT_CLASSYEARS:
                 s.calc_level_credits()
             s.calc_overall(cy)
+            if cy in ('31', '31m'):
+                s.calc_bsc_class_y3mphys(cy)
+            if cy in ('4', '4m'):
+                # Y3+Y4 credit accounting must run before calc_deg_class, which uses
+                # credits_passed_y3y4 for MPhys/MMath classification.
+                # Default to 0 for all Y4 students; override from supplementary file where matched.
+                s.y3creds_below40_not_excl = 0
+                s.y3creds_below40_excl     = 0
+                s.y3creds_l4_passed        = 0
+                s.y3creds_below40          = 0
+                if y3_credits:
+                    data = y3_credits.get(_norm_eid(s.emplid))
+                    if data:
+                        s.y3creds_below40_not_excl = data.get('y3creds_below40_not_excl') or 0
+                        s.y3creds_below40_excl     = data.get('y3creds_below40_excl') or 0
+                        s.y3creds_l4_passed        = data.get('y3creds_l4_passed') or 0
+                        s.y3creds_below40          = s.y3creds_below40_not_excl + s.y3creds_below40_excl
+
+                # L3+ credits failed in the current Y4 grid (non-excluded units with mark <= PASS_MARK).
+                grid_failed = sum(
+                    u.credits for u in s.units
+                    if u.credits is not None
+                    and _numeric_mark(u.mark) is not None
+                    and not (_numeric_mark(u.mark) > PASS_MARK)
+                    and not u.excluded
+                    and _course_level(u.coursename or u.module or '') in (3, 4, 5, 6)
+                )
+                s.l3_l4_credits_failed = s.y3creds_below40 + grid_failed
+                # L3+ credits passed over Y3+Y4 (incl. project) for degree classification.
+                s.credits_passed_y3y4  = MPHYS_CREDITS_TOTAL - s.l3_l4_credits_failed
+
+                # Formatted strings for output columns
+                s.y3_creds_failed_str = (f"{s.y3creds_below40_excl} / "
+                                         f"{s.y3creds_below40_not_excl}")
+                l4_total = s.y3creds_l4_passed + s.credits_l4
+                s.l4_creds_y3y4_str = f"{s.y3creds_l4_passed}+{s.credits_l4}={l4_total}"
+            if cy in FINAL_CLASSYEARS:
+                s.calc_project_mark(cy)
+                s.calc_deg_class(cy)
+
+            if cf_flags:
+                s.cf_flags = cf_flags.get(_norm_eid(s.emplid), '')
+
+            s.detect_intercal(cy)
+            s.apply_special_status(cy)   # explicit lists override auto-detection
 
             # ***For testing/debugging keep this here (comment out when doing actual runs)
             #print(s.emplid, s.name)
             #if (s.emplid == 11116225):
             #    from IPython import embed
             #    embed()
+        if args.sort_output:
+            sort_attr = 'overall' if cy in FINAL_CLASSYEARS else 'yearmark'
+            _BOTTOM_LABELS = frozenset({'Manual', 'Interrupt', 'Intercal', 'Withdrawn'})
+            def _sort_key(s):
+                label = s.deg_class_alg if cy in FINAL_CLASSYEARS else s.status
+                if label in _BOTTOM_LABELS:
+                    return (float('inf'), s.name or '')
+                try:
+                    return (-float(getattr(s, sort_attr)), s.name or '')
+                except (TypeError, ValueError):
+                    return (float('inf'), s.name or '')
+            students.sort(key=_sort_key)
+
         write_students(students, outpath, cy)
+        _out(f"  {_lbl('Output')}: {outpath}")
+
+        for line in _stats_lines(students, cy):
+            _out(line)
 
     if errors and multi:
-        print(f"\n{errors} classyear(s) skipped due to missing or unreadable input files.")
+        _out(f"\n{errors} classyear(s) skipped due to missing or unreadable input files.")
 
-
+    # ---- write report file ----
+    if set(classyears) == set(ALL_CLASSYEARS):
+        tag = 'all'
+    elif len(classyears) == 1:
+        tag = classyears[0]
+    else:
+        tag = '_'.join(classyears)
+    report_path = f"pyassess_results_AY{AY}_{tag}.txt"
+    try:
+        with open(report_path, 'w', encoding='utf-8') as fh:
+            fh.write('\n'.join(buf) + '\n')
+        print(f"\nReport written to: {report_path}")
+    except Exception as exc:
+        print(f"\nWARNING: could not write report — {exc}")
 
     # ***For testing/debugging keep this here (comment out when doing actual runs)
     #from IPython import embed
