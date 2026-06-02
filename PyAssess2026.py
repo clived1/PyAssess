@@ -5,6 +5,15 @@
 # Date: 2026-05-30
 # Version: 1.0 (02-Jun-2026 almost ready for June exams - resits will do over the summer)
 
+# Requirements: 
+# -Python >3.10
+# -pandas v2.1.0 or higher
+# -openpyxl v3.1.2 or higher
+#
+# How to run:
+# Python PyAssess2026.py --classyear 1/1m/2m/31/31m/4/4m/all [ --fill_marks --sort ]
+# (change AY, INDIR and FILENAMES as appropriate)
+
 import argparse
 import math
 import os
@@ -23,19 +32,20 @@ from openpyxl.utils import get_column_letter
 AY          = 2025                  # Academic year (2025 = AY 2024-25 etc.)
 INDIR       = "data2025_newcodes"   # Directory containing input exam grid spreadsheets
 OUTDIR      = "./"                  # Output directory for generated spreadsheets
-SORT_OUTPUT = False                 # Sort output by mark (descending); overridden by --sort
+SORT_OUTPUT  = False  # Sort output by mark (descending); overridden by --sort
+FILL_MARKS   = None  # Fill blank marks before processing: None = disabled, or a float e.g. 50.0; overridden by --fill_marks
 
 # Additional excel files to be read in
 Y3_CREDITS_FILENAME = "y4-comp-and-L4-2025.xlsx"  # supplementary Y3 credit data for Y4 students
-CF_FLAG_FILE = os.path.join(INDIR, 'PHYS Carry forward.xlsx')  # carry-forward notes (set to None to disable)
+CF_FLAG_FILE = 'PHYS Carry forward.xlsx'  # carry-forward notes filename (set to None to disable)
 
 # Special-status student lists.  Add emplids (int or str) to override normal
 # processing.  Matched students have their status (progressing years) or
 # Deg Class Alg/Actual (final years) set to the corresponding label, all
 # computed output codes cleared, and resits/fail reasons removed.
-interrupt_list = []   # interrupted studies  → 'Interrupt'
+interrupt_list = [11021684,11061389,11064835]   # interrupted studies  → 'Interrupt'
 manual_list    = []   # manual board decision → 'Manual'
-withdrawn_list = []   # withdrawn students   → 'Withdrawn'
+withdrawn_list = [11307037,10895432]   # withdrawn students   → 'Withdrawn'
 
 # Pass mark for any individual unit
 PASS_MARK = 39.95
@@ -641,7 +651,7 @@ class StudentInfo:
 
         Y2 MPhys/MMath additional yearmark check (non-FAIL students on 4-year course):
           > MPHYS_PROGRESS_MARK  → status unchanged (ACTV/REVW/A/D as normal)
-          <= MPHYS_PROGRESS_MARK, referrals but no deferrals  → REVW_BSc
+          <= MPHYS_PROGRESS_MARK, referrals but no deferrals  → REVW (BSc)
           <= MPHYS_PROGRESS_MARK, ACTV or has deferrals:
             > MPHYS_REVIEW_MARK  → R/X   (borderline; reviewed later)
             <= MPHYS_REVIEW_MARK → R/BSc (transferred to BSc programme)
@@ -666,15 +676,18 @@ class StudentInfo:
             if ym is None:
                 pass  # no yearmark — leave status as-is
             elif ym > MPHYS_PROGRESS_MARK:
-                pass  # above 55% — fine to progress, leave status as-is
-            elif self.referred_idx and not self.deferred_idx:
-                self.status = 'REVW_BSc'
-            else:
-                # ACTV or has deferrals (with or without referrals)
-                if ym > MPHYS_REVIEW_MARK:
-                    self.status = 'R/X'
+                pass  # above threshold — fine to progress, leave status as-is
+            elif ym > MPHYS_REVIEW_MARK:
+                # Borderline zone (MPHYS_REVIEW_MARK < ym <= MPHYS_PROGRESS_MARK)
+                if self.referred_idx:
+                    self.status = 'REVW (BSc)'   # referrals (±deferrals)
+                elif self.deferred_idx:
+                    pass                        # deferrals only → keep A/D
                 else:
-                    self.status = 'R/BSc'
+                    self.status = 'R/X'         # ACTV, borderline
+            else:
+                # Below review mark → R/BSc regardless of deferrals/referrals
+                self.status = 'R/BSc'
 
     def calc_bsc_class_y3mphys(self, classyear):
         """Check Y3→Y4 progression for MPhys/MMath students (classyear 31/31m).
@@ -1906,8 +1919,8 @@ def write_students(students, outpath, classyear):
         for j, tname in enumerate(trailer_names):
             attr  = _TRAILING_ATTR.get(tname)
             value = getattr(s, attr) if attr else s.trailing.get(tname)
-            if tname == 'Notes' and s.cf_flags:
-                value = s.cf_flags
+            if tname == 'Notes':
+                value = s.cf_flags or None
             cell  = _c(info_row, t_start + j, value)
             fmt   = _TRAILING_FORMAT.get(tname)
             if fmt:
@@ -2137,7 +2150,7 @@ def _stats_lines(students, cy):
     _PREFIX_ORDER = {'MPhys': 0, 'MMath': 0, 'BSc': 1}
     _STATUS_ORDER = {
         'ACTV': 0, 'A/D': 1, 'REVW': 2, 'R/X': 3,
-        'R/BSc': 4, 'REVW_BSc': 5, 'FAIL': 99,
+        'R/BSc': 4, 'REVW (BSc)': 5, 'FAIL': 99,
     }
 
     def _deg_key(cls):
@@ -2226,6 +2239,19 @@ def parse_args():
         )
     )
     parser.add_argument(
+        '--fill_marks',
+        nargs='?',
+        const=50.0,
+        default=FILL_MARKS,
+        type=float,
+        metavar='MARK',
+        help=(
+            "Fill blank unit marks with MARK before processing. "
+            "Defaults to 50.0 when the flag is given without a value. "
+            "Non-blank marks (including strings such as 'P'/'F') are left unchanged."
+        )
+    )
+    parser.add_argument(
         '--sort', '--sort_output',
         dest='sort_output',
         action='store_true',
@@ -2280,9 +2306,10 @@ def main():
         if y3_credits:
             _out(f"  {_lbl('Y3 credit data')}: {y3cr_path}  ({len(y3_credits)} students)")
 
-    cf_flags = read_cf_flags(CF_FLAG_FILE)
+    cf_path  = os.path.join(INDIR, CF_FLAG_FILE) if CF_FLAG_FILE else None
+    cf_flags = read_cf_flags(cf_path)
     if cf_flags:
-        _out(f"  {_lbl('Carry-forward notes')}: {CF_FLAG_FILE}  ({len(cf_flags)} students)")
+        _out(f"  {_lbl('Carry-forward notes')}: {cf_path}  ({len(cf_flags)} students)")
 
     for cy in classyears:
         infile, outfile = CLASSYEAR_FILES[cy]
@@ -2313,6 +2340,17 @@ def main():
         n_units = len(students[0].units) if students else 0
         _out(f"  {_lbl('Input')}: {inpath}")
         _out(f"  {_lbl('Students')}: {len(students)} students, {n_units} units each")
+
+        if args.fill_marks is not None:
+            filled = sum(
+                1 for s in students for u in s.units if u.mark is None
+            )
+            for s in students:
+                for u in s.units:
+                    if u.mark is None:
+                        u.mark = args.fill_marks
+            _out(f"  {_lbl('Blank marks filled')}: {filled} with {args.fill_marks}")
+
         prev_cols = _PREV_YEARMARK_COLS.get(cy, {})
         for s in students:
             for attr, col_key in prev_cols.items():
@@ -2408,7 +2446,7 @@ def main():
         tag = classyears[0]
     else:
         tag = '_'.join(classyears)
-    report_path = f"pyassess_results_AY{AY}_{tag}.txt"
+    report_path = os.path.join(INDIR, f"pyassess_results_AY{AY}_{tag}.txt")
     try:
         with open(report_path, 'w', encoding='utf-8') as fh:
             fh.write('\n'.join(buf) + '\n')
