@@ -36,8 +36,9 @@ SORT_OUTPUT  = False  # Sort output by mark (descending); overridden by --sort
 FILL_MARKS   = None  # Fill blank marks before processing: None = disabled, or a float e.g. 50.0; overridden by --fill_marks
 
 # Additional excel files to be read in
-Y3_CREDITS_FILENAME = "y4-comp-and-L4-2025.xlsx"  # supplementary Y3 credit data for Y4 students
+Y3_CREDITS_FILE = "y4-comp-and-L4-2025.xlsx"  # supplementary Y3 credit data for Y4 students
 CF_FLAG_FILE = 'PHYS Carry forward.xlsx'  # carry-forward notes filename (set to None to disable)
+ABROAD_FILE = 'Study abroad 2023-24.xlsx'  # extra study-abroad emplids in its 1st column, merged into abroad_list (set filename; None to disable)
 
 # Special-status student lists.  Add emplids (int or str) to override normal
 # processing.  Matched students have their status (progressing years) or
@@ -46,6 +47,13 @@ CF_FLAG_FILE = 'PHYS Carry forward.xlsx'  # carry-forward notes filename (set to
 interrupt_list = [11021684,11061389,11064835]   # interrupted studies  → 'Interrupt'
 manual_list    = []   # manual board decision → 'Manual'
 withdrawn_list = [11307037,10895432]   # withdrawn students   → 'Withdrawn'
+
+# Manual study-abroad override: 8-digit emplids of 4-year MPhys/MMath students
+# who spent a year abroad but whose plan string does NOT contain 'study' (so
+# they aren't auto-detected). Listed students are treated as study-abroad and
+# use _MPHYS_ABROAD_WEIGHTS for the Y4 (4/4m) overall mark.
+abroad_list = [10820251, 10826844, 10830728, 10849791, 10818157, 10821713, 10833591, 10834291, 10943429, 10669557, 10706596, 11487593, 11498024, 11498021, 11498023, 11184110]
+#abroad_list = []
 
 # Pass mark for any individual unit
 PASS_MARK = 39.95
@@ -61,7 +69,7 @@ BOUNDARY_THIRD  = 39.95
 
 # BSc L3 credit requirements for degree classification.
 # For 1st/2.1/2.2 the student must have passed >= BSC_L3_CREDITS_UPPER credits at
-# level 3 (mark > PASS_MARK), including all MUST_PASS units (lab and dissertation).
+# level 3 (mark > PASS_MARK), including all MUST_PASS units (lab and project).
 # For a proper 3rd they need >= BSC_L3_CREDITS_THIRD L3 credits including MUST_PASS units;
 # for an ordinary 3rd they need >= BSC_L3_CREDITS_THIRD without the MUST_PASS requirement.
 BSC_L3_CREDITS_UPPER = 80
@@ -73,12 +81,14 @@ BSC_L3_CREDITS_THIRD = 60
 BSC_BORDERLINE_UPPER = 2.0   # applies to 1st, 2.1, 2.2 boundaries
 BSC_BORDERLINE_THIRD = 3.0   # applies to the 3rd-class boundary
 
-# Minimum L3 credits (at marks >= the target boundary) for borderline promotion.
-# Algorithm A requires >= BSC_PROMO_A_CREDITS;
-# Algorithm B requires >= BSC_PROMO_B_CREDITS but also needs
-# the BSc dissertation to be at the target level and yearmark > overall.
-BSC_PROMO_A_CREDITS = 80
-BSC_PROMO_B_CREDITS = 70
+# Minimum credits (any current-year level, at marks >= the target boundary) for
+# borderline promotion.  Both programmes try Algorithm A first, then Algorithm B.
+# Algorithm A's threshold differs by programme (BSC_PROMO_A_CREDITS for BSc,
+# Y4_PROMO_A_CREDITS for MPhys/MMath); Algorithm B shares one threshold
+# (PROMO_B_CREDITS) but also needs the project at the target level and yearmark > overall.
+BSC_PROMO_A_CREDITS = 80   # BSc algorithm A
+Y4_PROMO_A_CREDITS  = 75   # MPhys/MMath algorithm A
+PROMO_B_CREDITS     = 70   # algorithm B (BSc and MPhys/MMath)
 
 # MPhys/MMath (4-year) degree classification credit requirements.
 # Classification mirrors the BSc rules but over the combined Y3+Y4 (level 3 and
@@ -91,13 +101,13 @@ BSC_PROMO_B_CREDITS = 70
 MPHYS_CREDITS_TOTAL = 240    # nominal Y3+Y4 credits taken
 MPHYS_CREDITS_FULL  = 200    # credits passed (incl. project) for the mark-indicated class
 MPHYS_CREDITS_SHORT = 180    # short-credit floor (up to 20 short) → one class lower
-# Borderline promotion (analogous to BSc algorithm A): a borderline student is
-# promoted to the class above if they passed >= Y4_PROMO_CREDITS credits in
-# Y4 at level 3+ achieving at least the target-class boundary mark.
-Y4_PROMO_CREDITS = 75
 
 # BSc dissertation modules — used to locate the dissertation unit for Algorithm B.
 BSC_DISSERTATION_MODULES = frozenset({'PHYS30880', 'PHYS30881', 'PHYS30882'})
+
+# BSc project modules: the Physics dissertation, plus MATH30022 — the equivalent
+# project for BSc Maths+Physics students.  These are the BSc project mark.
+BSC_PROJECT_MODULES = BSC_DISSERTATION_MODULES | frozenset({'MATH30022'})
 
 # Professional placement and year-abroad module codes.
 # If a student has one of these units and the mark is absent (blank, -1, or
@@ -112,7 +122,7 @@ MIN_PASS_CREDITS         = 60   # credits at >= PASS_MARK needed at first attemp
 # Y2 yearmark thresholds for MPhys/MMath progression
 MPHYS_PROGRESS_MARK = 54.95   # must exceed this to progress to MPhys/MMath Y3 (ACTV)
 MPHYS_REVIEW_MARK   = 52.95   # borderline band: >this but <=MPHYS_PROGRESS_MARK → R/X
-                               # at or below this → R/BSc (moved to BSc programme)
+                               # at or below this → BSc (moved to BSc programme)
 
 # Y3 MPhys/MMath → Y4 progression thresholds (classyear 31/31m)
 MPHYS_Y3_PROG_YEARMARK       = 49.95   # yearmark must exceed this to progress
@@ -122,10 +132,18 @@ MPHYS_Y3_PROG_PHYS_MATH_MARK = 44.95  # MMath only: both phys and maths yearmark
 
 FINAL_CLASSYEARS = ['32', '32m', '4', '4m']   # graduating / final-year students
 
-# Units that must be passed if taken (lab, BSc project, MPhys project)
-MUST_PASS = frozenset({'PHYS10180', 'PHYS10280', 'PHYS20180', 'PHYS20280',
-                       'PHYS30180', 'PHYS30280', 'PHYS30880', 'PHYS30881',
-                       'PHYS30882', 'PHYS40181', 'PHYS40182'})
+# Lab units that must be passed if taken — the experimental physics lab in each
+# year/semester.  A failed lab (in any year) cannot be compensated.
+MUST_PASS_LAB = frozenset({'PHYS10180', 'PHYS10280', 'PHYS20180', 'PHYS20280',
+                           'PHYS30180', 'PHYS30280'})
+
+# Project units that must be passed for the degree — the BSc project
+# (BSC_PROJECT_MODULES) and the MPhys project (PHYS40181/2).  These form the
+# project mark and are a pass requirement for the BSc and MPhys/MMath degrees.
+MUST_PASS_PROJECT = BSC_PROJECT_MODULES | frozenset({'PHYS40181', 'PHYS40182'})
+
+# All units that must be passed if taken (lab in any year + project).
+MUST_PASS = MUST_PASS_LAB | MUST_PASS_PROJECT
 
 # Maths units that Y1 M+P students must pass — cannot be compensated
 MUST_PASS_MATHS = frozenset({'MATH11121', 'MATH11022'})
@@ -270,6 +288,8 @@ _MPHYS_WEIGHTS        = {1:  6,  2: 19,  3: 37.5, 4: 37.5}  # standard MPhys Y4
 _MPHYS_ABROAD_WEIGHTS = {1:  8,  2: 23,  3: 23,   4: 46}    # MPhys with Y3 study abroad
 
 
+#==================================================================================
+# Functions!
 
 def _parse_module(module):
     """Split 'PHYS10180 (20)' into ('PHYS10180', 20).
@@ -375,7 +395,7 @@ class StudentInfo:
         'phys1', 'phys2', 'phys3',
         'credits_l3', 'credits_l4', 'l3_l4_creds_passed',
         'credits_l3_first', 'credits_l3_upper2', 'credits_l3_lower2', 'credits_l3_third',
-        'credits_l3plus_first', 'credits_l3plus_upper2', 'credits_l3plus_lower2', 'credits_l3plus_third',
+        'credits_at_first', 'credits_at_upper2', 'credits_at_lower2', 'credits_at_third',
         'overall',
         'project_mark', 'project_creds',
         'deg_class_alg', 'deg_class_actual',
@@ -399,7 +419,7 @@ class StudentInfo:
         self.psi            = None
         self.plan           = None   # degree programme, e.g. 'MPhys(Hons) Physics'
         self.is_mphys_track  = False  # True if plan is MPhys or MMath (4-year course)
-        self.is_study_abroad = False  # True if MPhys student with Y3 study abroad
+        self.is_study_abroad = False  # True if year-abroad (plan has 'study', or in abroad_list)
         self.is_pp           = False  # True if student has a professional placement unit
         self.is_abroad       = False  # True if student has a year abroad unit
         self.units_passed   = None
@@ -443,10 +463,10 @@ class StudentInfo:
         self.credits_l3_upper2   = 0      # L3 credits (incl. excluded) with mark >= BOUNDARY_UPPER2
         self.credits_l3_lower2   = 0      # L3 credits (incl. excluded) with mark >= BOUNDARY_LOWER2
         self.credits_l3_third    = 0      # L3 credits (incl. excluded) with mark >= BOUNDARY_THIRD
-        self.credits_l3plus_first  = 0    # L3+ credits (incl. excluded) with mark >= BOUNDARY_FIRST
-        self.credits_l3plus_upper2 = 0    # L3+ credits (incl. excluded) with mark >= BOUNDARY_UPPER2
-        self.credits_l3plus_lower2 = 0    # L3+ credits (incl. excluded) with mark >= BOUNDARY_LOWER2
-        self.credits_l3plus_third  = 0    # L3+ credits (incl. excluded) with mark >= BOUNDARY_THIRD
+        self.credits_at_first  = 0    # all current-year credits (incl. excluded) with mark >= BOUNDARY_FIRST
+        self.credits_at_upper2 = 0    # all current-year credits (incl. excluded) with mark >= BOUNDARY_UPPER2
+        self.credits_at_lower2 = 0    # all current-year credits (incl. excluded) with mark >= BOUNDARY_LOWER2
+        self.credits_at_third  = 0    # all current-year credits (incl. excluded) with mark >= BOUNDARY_THIRD
         self.overall             = None   # weighted overall mark across years
         self.project_mark        = None   # credit-weighted average project mark (rounded int), or None
         self.project_creds       = 0      # total project credits
@@ -649,12 +669,16 @@ class StudentInfo:
           A/D   — one or more deferrals, no referrals (self.deferred_idx non-empty)
           ACTV  — default: active, fine to progress
 
-        Y2 MPhys/MMath additional yearmark check (non-FAIL students on 4-year course):
-          > MPHYS_PROGRESS_MARK  → status unchanged (ACTV/REVW/A/D as normal)
-          <= MPHYS_PROGRESS_MARK, referrals but no deferrals  → REVW (BSc)
-          <= MPHYS_PROGRESS_MARK, ACTV or has deferrals:
-            > MPHYS_REVIEW_MARK  → R/X   (borderline; reviewed later)
-            <= MPHYS_REVIEW_MARK → R/BSc (transferred to BSc programme)
+        Y2 MPhys/MMath additional yearmark check (non-FAIL students on 4-year course).
+        When yearmark <= MPHYS_PROGRESS_MARK (borderline or below), by referral/deferral mix:
+          deferrals only (no referrals)        → A/D (kept on MPhys/MMath, even if below review mark)
+          any referrals (with or without deferrals):
+            borderline (> MPHYS_REVIEW_MARK)   → REVW R/X
+            below      (<= MPHYS_REVIEW_MARK)  → REVW (BSc)
+          neither (ACTV):
+            borderline (> MPHYS_REVIEW_MARK)   → R/X
+            below      (<= MPHYS_REVIEW_MARK)  → BSc
+        A yearmark > MPHYS_PROGRESS_MARK leaves the status unchanged.
         """
         if classyear in FINAL_CLASSYEARS:
             return
@@ -673,21 +697,19 @@ class StudentInfo:
                 and self.is_mphys_track
                 and self.status != 'FAIL'):
             ym = self.yearmark
-            if ym is None:
-                pass  # no yearmark — leave status as-is
-            elif ym > MPHYS_PROGRESS_MARK:
-                pass  # above threshold — fine to progress, leave status as-is
-            elif ym > MPHYS_REVIEW_MARK:
-                # Borderline zone (MPHYS_REVIEW_MARK < ym <= MPHYS_PROGRESS_MARK)
-                if self.referred_idx:
-                    self.status = 'REVW (BSc)'   # referrals (±deferrals)
-                elif self.deferred_idx:
-                    pass                        # deferrals only → keep A/D
-                else:
-                    self.status = 'R/X'         # ACTV, borderline
+            if ym is None or ym > MPHYS_PROGRESS_MARK:
+                pass  # no yearmark, or clears the progression mark — leave status as-is
             else:
-                # Below review mark → R/BSc regardless of deferrals/referrals
-                self.status = 'R/BSc'
+                # borderline = MPHYS_REVIEW_MARK < ym <= MPHYS_PROGRESS_MARK; else below.
+                borderline = ym > MPHYS_REVIEW_MARK
+                if self.referred_idx:
+                    # Any referrals (with or without deferrals)
+                    self.status = 'REVW R/X' if borderline else 'REVW (BSc)'
+                elif self.deferred_idx:
+                    self.status = 'A/D'    # deferrals only → stays on MPhys/MMath
+                else:
+                    # No deferrals or referrals (ACTV)
+                    self.status = 'R/X' if borderline else 'BSc'
 
     def calc_bsc_class_y3mphys(self, classyear):
         """Check Y3→Y4 progression for MPhys/MMath students (classyear 31/31m).
@@ -696,12 +718,18 @@ class StudentInfo:
           yearmark       > MPHYS_Y3_PROG_YEARMARK
           overall        > MPHYS_Y3_PROG_OVERALL
           credits_passed >= MPHYS_Y3_PROG_CREDITS
+          no unresittable lab (MUST_PASS_LAB) failure
+          (MMath only) phys and maths yearmarks > MPHYS_Y3_PROG_PHYS_MATH_MARK
 
         Students who already have status 'FAIL' are left unchanged.  Students
         who fail any criterion are treated as BSc candidates: the equivalent
         BSc classification is computed and written to self.status and the
         trailing 'Award' column.  Status is prefixed with 'REVW ' when the
         student is in a borderline zone; the Award value is never prefixed.
+
+        self.fail_reason records which criteria sent the student to BSc
+        consideration (credits, average, overall, Phys/Maths averages, or a
+        failed compulsory lab), shown in the 'Fail reason' output column.
         """
         if self.status == 'FAIL':
             return
@@ -726,16 +754,48 @@ class StudentInfo:
             except (TypeError, ValueError):
                 math_ok = False
 
+        # A lab (MUST_PASS_LAB, any year/semester) that is failed and not being resat
+        # cannot be carried into Y4 — the student cannot continue MPhys/MMath without
+        # it.  Using the lab set (not MUST_PASS) keeps placeholder project units out.
+        lab_failed = any(
+            (self.units[idx].coursename or self.units[idx].module or '') in MUST_PASS_LAB
+            for idx in self.failed_idx
+            if idx not in self.referred_idx
+        )
+
         if (ym > MPHYS_Y3_PROG_YEARMARK
                 and ov > MPHYS_Y3_PROG_OVERALL
                 and (self.credits_passed or 0) >= MPHYS_Y3_PROG_CREDITS
-                and phys_ok and math_ok):
+                and phys_ok and math_ok
+                and not lab_failed):
             return   # meets all criteria — progress to Y4 unchanged
 
         # Failed at least one criterion: compute BSc classification.
+        prior_reason = self.fail_reason   # e.g. 'Resit failed lab' from calc_referrals
         bsc_cy = '32m' if classyear.endswith('m') else '32'
         self.calc_project_mark(bsc_cy)
         self.calc_deg_class(bsc_cy)
+
+        # Record why the student dropped to BSc consideration.  This overrides the
+        # BSc-Fail reasons set by calc_deg_class so the column reads as the
+        # MPhys/MMath progression miss (like the Fail reason shown in other years).
+        reasons = []
+        if prior_reason:
+            reasons.append(prior_reason)
+        creds = self.credits_passed or 0
+        if creds < MPHYS_Y3_PROG_CREDITS:
+            reasons.append(f'<{MPHYS_Y3_PROG_CREDITS} credits ({creds})')
+        if not (ym > MPHYS_Y3_PROG_YEARMARK):
+            reasons.append(f'yearmark <{int(MPHYS_Y3_PROG_YEARMARK + 0.5)}')
+        if not (ov > MPHYS_Y3_PROG_OVERALL):
+            reasons.append(f'overallmark <{int(MPHYS_Y3_PROG_OVERALL + 0.5)}')
+        if not phys_ok:
+            reasons.append(f'Phys average <{int(MPHYS_Y3_PROG_PHYS_MATH_MARK + 0.5)}')
+        if not math_ok:
+            reasons.append(f'Maths average <{int(MPHYS_Y3_PROG_PHYS_MATH_MARK + 0.5)}')
+        if lab_failed and not any('lab' in r.lower() for r in reasons):
+            reasons.append('Failed lab')
+        self.fail_reason = ' / '.join(reasons)
 
         bsc_class = self.deg_class_actual
         if bsc_class is None:
@@ -841,10 +901,11 @@ class StudentInfo:
     def calc_level_credits(self):
         """Count passed credits at level 3 and level 4 (level 6 treated as level 4; level 5 excluded).
 
-        Also tallies L3 credits at each degree-class boundary (mark >= boundary), including
-        excluded units, for use in degree classification and borderline promotion.
-        All counts ignore exclusion status — only the numeric mark is tested.
-        Sets credits_l3, credits_l4, l3_l4_creds_passed, and credits_l3_first/upper2/lower2/third.
+        Also tallies, at each degree-class boundary (mark >= boundary), the L3-only
+        credits (credits_l3_*) and ALL current-year credits of any level (credits_at_*,
+        used for borderline promotion).  All counts include excluded units — only the
+        numeric mark is tested.
+        Sets credits_l3, credits_l4, l3_l4_creds_passed, credits_l3_* and credits_at_*.
         """
         l3 = 0
         l4 = 0
@@ -852,10 +913,10 @@ class StudentInfo:
         l3_upper2 = 0
         l3_lower2 = 0
         l3_third  = 0
-        l3p_first  = 0
-        l3p_upper2 = 0
-        l3p_lower2 = 0
-        l3p_third  = 0
+        at_first  = 0
+        at_upper2 = 0
+        at_lower2 = 0
+        at_third  = 0
         for unit in self.units:
             if unit.credits is None or unit.module is None:
                 continue
@@ -877,15 +938,16 @@ class StudentInfo:
             elif level in (4, 6):
                 if mark_num > PASS_MARK:
                     l4 += unit.credits
-            if level in (3, 4, 5, 6):
-                if mark_num >= BOUNDARY_FIRST:
-                    l3p_first += unit.credits
-                if mark_num >= BOUNDARY_UPPER2:
-                    l3p_upper2 += unit.credits
-                if mark_num >= BOUNDARY_LOWER2:
-                    l3p_lower2 += unit.credits
-                if mark_num >= BOUNDARY_THIRD:
-                    l3p_third += unit.credits
+            # Credits at each class boundary count ALL current-year units (any
+            # level, incl. excluded) — used for borderline promotion (Alg A/B).
+            if mark_num >= BOUNDARY_FIRST:
+                at_first += unit.credits
+            if mark_num >= BOUNDARY_UPPER2:
+                at_upper2 += unit.credits
+            if mark_num >= BOUNDARY_LOWER2:
+                at_lower2 += unit.credits
+            if mark_num >= BOUNDARY_THIRD:
+                at_third += unit.credits
         self.credits_l3           = l3
         self.credits_l4           = l4
         self.l3_l4_creds_passed   = f"{l3} + {l4} = {l3 + l4}"
@@ -893,10 +955,10 @@ class StudentInfo:
         self.credits_l3_upper2    = l3_upper2
         self.credits_l3_lower2    = l3_lower2
         self.credits_l3_third     = l3_third
-        self.credits_l3plus_first  = l3p_first
-        self.credits_l3plus_upper2 = l3p_upper2
-        self.credits_l3plus_lower2 = l3p_lower2
-        self.credits_l3plus_third  = l3p_third
+        self.credits_at_first  = at_first
+        self.credits_at_upper2 = at_upper2
+        self.credits_at_lower2 = at_lower2
+        self.credits_at_third  = at_third
 
     def calc_overall(self, classyear):
         """Set self.overall to the weighted overall mark across available year marks.
@@ -911,7 +973,9 @@ class StudentInfo:
         '-1' if no valid year marks are available.
 
         M+P variants use the same weights as their non-M+P counterparts.
-        Study abroad only applies to MPhys (not MMath), handled via is_study_abroad.
+        Study abroad is flagged via is_study_abroad (auto-detected when the plan
+        string contains 'study', or forced via the abroad_list override) and
+        applies to both the MPhys (4) and MMath (4m) final years.
         """
         # Strip 'm' suffix so M+P variants share the same branch as non-M+P.
         base = classyear.rstrip('m')
@@ -957,7 +1021,8 @@ class StudentInfo:
         """Set project_mark (credit-weighted average, rounded int) and project_creds.
 
         Handles all final-year programmes:
-          BSc / BSc M+P (32/32m) : BSc dissertation (any BSC_DISSERTATION_MODULES code)
+          BSc / BSc M+P (32/32m) : BSc project (any BSC_PROJECT_MODULES code:
+                                   PHYS dissertation, or MATH30022 for Maths+Physics)
           MPhys (4)              : PHYS40181 (S1) and/or PHYS40182 (S2);
                                    PHIL40000 for Physics with Philosophy students
           MMath (4m)             : MATH40011 and/or MATH40022
@@ -981,14 +1046,12 @@ class StudentInfo:
         p2m = p2c = None
 
         if base == '32':
-            # BSc dissertation — try PHYS dissertation codes first, then MATH30022 fallback
-            for code in BSC_DISSERTATION_MODULES:
+            # BSc project: Physics dissertation (PHYS3088x) or MATH30022 (Maths+Physics)
+            for code in BSC_PROJECT_MODULES:
                 m, c = _find(code)
                 if m is not None:
                     p1m, p1c = m, c
                     break
-            if p1m is None:
-                p1m, p1c = _find('MATH30022')
 
         else:
             # MPhys standard projects (S1 + S2)
@@ -1032,7 +1095,7 @@ class StudentInfo:
 
         For BSc (classyear 32/32m):
           Upper classes (1/2.1/2.2): overall mark >= boundary AND >= BSC_L3_CREDITS_UPPER
-            passed L3 credits, including all MUST_PASS units (lab and dissertation).
+            passed L3 credits, including all MUST_PASS units (lab and project).
           Short-credit rule: if L3 credits are in [BSC_L3_CREDITS_THIRD, BSC_L3_CREDITS_UPPER)
             and MUST_PASS are satisfied, award one class below the mark-indicated class.
           3rd class: overall >= BOUNDARY_THIRD AND >= BSC_L3_CREDITS_THIRD L3 credits
@@ -1045,10 +1108,10 @@ class StudentInfo:
             2% below each upper-class boundary (BSC_BORDERLINE_UPPER), 3% below the
             3rd-class boundary (BSC_BORDERLINE_THIRD).  Borderline students are recorded
             in self.borderline_for (e.g. '1', '2.1').
-            Algorithm A: if >BSC_PROMO_A_CREDITS L3 credits at the target boundary
-              mark, promote to the higher class; record 'P(A)' in deg_class_rev.
-            Algorithm B (tried only if A fails): if >BSC_PROMO_B_CREDITS L3 credits
-              at the target boundary mark, AND the BSc dissertation mark is at the target
+            Algorithm A: if >= BSC_PROMO_A_CREDITS credits (any level) at the target
+              boundary mark, promote to the higher class; record 'P(A)' in deg_class_rev.
+            Algorithm B (tried only if A fails): if >= PROMO_B_CREDITS credits (any
+              level) at the target boundary mark, AND the BSc dissertation mark is at the target
               level, AND yearmark > overall; promote and record 'P(B)'.
 
         For MPhys (classyear 4) / MMath (classyear 4m):
@@ -1057,8 +1120,10 @@ class StudentInfo:
           (= MPHYS_CREDITS_TOTAL - l3_l4_credits_failed) AND a passed project.
           Short on credits by up to 20 (>= MPHYS_CREDITS_SHORT) with a passed project
           drops the class one level.  Borderline promotion (within 2% below a
-          boundary) lifts a student one class if they passed >= Y4_PROMO_CREDITS
-          Y4 credits at level 3+ at the target boundary mark.  A student who fails the
+          boundary) lifts a student one class via algorithm A (>= Y4_PROMO_A_CREDITS
+          Y4 credits, any level, at the target boundary mark) or, failing that,
+          algorithm B (>= PROMO_B_CREDITS such credits, project at the target level,
+          and yearmark > overall).  A student who fails the
           2nd-class requirements (overall < 2.2 boundary and not promoted, or short
           at 2.2, or project failed) reverts to a BSc degree based on years 1–3,
           awarded on the overall mark boundary only.
@@ -1069,7 +1134,7 @@ class StudentInfo:
         elif classyear == '4':
             prefix = 'MPhys'
         elif classyear == '4m':
-            prefix = 'MMath'
+            prefix = 'MMath&Phys'
         else:
             return
 
@@ -1081,12 +1146,15 @@ class StudentInfo:
             return
 
         if base == '32':
-            # has_req: every MUST_PASS unit in this student's list is passed
-            has_req = all(
-                _numeric_mark(u.mark) is not None and _numeric_mark(u.mark) > PASS_MARK
+            # Must-pass units (lab + project) not passed in this student's list;
+            # has_req holds when none failed.
+            must_pass_failed = {
+                (u.coursename or u.module or '')
                 for u in self.units
                 if (u.coursename or u.module or '') in MUST_PASS
-            )
+                and not (_numeric_mark(u.mark) is not None and _numeric_mark(u.mark) > PASS_MARK)
+            }
+            has_req = not must_pass_failed
             l3 = self.credits_l3 + self.credits_l4   # L3+ passed credits for classification
 
             if overall >= BOUNDARY_FIRST and l3 >= BSC_L3_CREDITS_UPPER and has_req:
@@ -1107,25 +1175,26 @@ class StudentInfo:
                 cls = 'Fail'
 
             # --- borderline detection and promotion ---
-            # Each zone maps (target class, lower bound, upper bound, pre-stored L3+ attr).
-            # L3+ credit counts include excluded units (computed in calc_level_credits).
+            # Each zone maps (target class, lower bound, upper bound, credits-at-boundary attr).
+            # credits_at_* count all current-year credits (any level) at the boundary mark,
+            # including excluded units (computed in calc_level_credits).
             # XB/BX in the BZ column extends every zone's lower bound by a further 1.0.
             cls_before_promo = cls   # base classification before any borderline promotion
             cls_alg = cls_before_promo
             bz_codes = _split_codes(self.bz)
             bz_extra = 1.0 if ('XB' in bz_codes or 'BX' in bz_codes) else 0.0
             _BORDERLINE_ZONES = (
-                ('1',   BOUNDARY_FIRST  - BSC_BORDERLINE_UPPER, BOUNDARY_FIRST,  'credits_l3plus_first'),
-                ('2.1', BOUNDARY_UPPER2 - BSC_BORDERLINE_UPPER, BOUNDARY_UPPER2, 'credits_l3plus_upper2'),
-                ('2.2', BOUNDARY_LOWER2 - BSC_BORDERLINE_UPPER, BOUNDARY_LOWER2, 'credits_l3plus_lower2'),
-                ('3',   BOUNDARY_THIRD  - BSC_BORDERLINE_THIRD, BOUNDARY_THIRD,  'credits_l3plus_third'),
+                ('1',   BOUNDARY_FIRST  - BSC_BORDERLINE_UPPER, BOUNDARY_FIRST,  'credits_at_first'),
+                ('2.1', BOUNDARY_UPPER2 - BSC_BORDERLINE_UPPER, BOUNDARY_UPPER2, 'credits_at_upper2'),
+                ('2.2', BOUNDARY_LOWER2 - BSC_BORDERLINE_UPPER, BOUNDARY_LOWER2, 'credits_at_lower2'),
+                ('3',   BOUNDARY_THIRD  - BSC_BORDERLINE_THIRD, BOUNDARY_THIRD,  'credits_at_third'),
             )
-            for target_cls, lo, hi, l3_attr in _BORDERLINE_ZONES:
+            for target_cls, lo, hi, at_attr in _BORDERLINE_ZONES:
                 if lo - bz_extra <= overall < hi:
                     self.borderline_for = target_cls
-                    l3_above = getattr(self, l3_attr)
+                    creds_at_target = getattr(self, at_attr)
 
-                    if l3_above >= BSC_PROMO_A_CREDITS:
+                    if creds_at_target >= BSC_PROMO_A_CREDITS:
                         cls = target_cls
                         self.deg_class_rev = 'P(A)'
                     else:
@@ -1134,7 +1203,7 @@ class StudentInfo:
                             ym = float(self.yearmark)
                         except (TypeError, ValueError):
                             ym = -1.0
-                        if (l3_above >= BSC_PROMO_B_CREDITS
+                        if (creds_at_target >= PROMO_B_CREDITS
                                 and self.project_mark is not None and self.project_mark >= hi
                                 and ym > overall):
                             cls = target_cls
@@ -1144,7 +1213,7 @@ class StudentInfo:
                             # 'CR' is always present (A's credit threshold not met).
                             # If B's credit threshold was met, also report B's other failures.
                             reasons = ['CR']
-                            if l3_above >= BSC_PROMO_B_CREDITS:
+                            if creds_at_target >= PROMO_B_CREDITS:
                                 if self.project_mark is None or self.project_mark < hi:
                                     reasons.append('Proj.')
                                 if ym >= 0 and not (ym > overall):
@@ -1152,33 +1221,34 @@ class StudentInfo:
                             self.deg_class_rev = '/'.join(reasons)
 
                             # --- promotion_x: informational, does not change degree class ---
-                            # Targets ONE CLASS ABOVE the base (nominal) classification,
-                            # using a reduced credit threshold of (2/3) of assessed credits
-                            # (non-excluded, with a mark), capped at BSC_PROMO_A_CREDITS.
+                            # Targets ONE CLASS ABOVE the base (nominal) classification.
+                            # Same rule as algorithms A and B (A tried first, then B), but the
+                            # credit bar is (2/3) of assessed credits (non-excluded, with a
+                            # mark; any level): A_X uses that value (capped at 80), B_X uses it
+                            # minus 10 (usually 80 -> 70), keeping a 10-credit B_X fallback band.
                             _X_ONE_ABOVE = {
-                                '3 ord': ('3',   'credits_l3plus_third',  BOUNDARY_THIRD),
-                                '3':     ('2.2', 'credits_l3plus_lower2', BOUNDARY_LOWER2),
-                                '2.2':   ('2.1', 'credits_l3plus_upper2', BOUNDARY_UPPER2),
-                                '2.1':   ('1',   'credits_l3plus_first',  BOUNDARY_FIRST),
+                                '3 ord': ('3',   'credits_at_third',  BOUNDARY_THIRD),
+                                '3':     ('2.2', 'credits_at_lower2', BOUNDARY_LOWER2),
+                                '2.2':   ('2.1', 'credits_at_upper2', BOUNDARY_UPPER2),
+                                '2.1':   ('1',   'credits_at_first',  BOUNDARY_FIRST),
                             }
                             if cls_before_promo in _X_ONE_ABOVE:
                                 x_cls, x_attr, x_hi = _X_ONE_ABOVE[cls_before_promo]
-                                l3_above_x = getattr(self, x_attr)
+                                creds_at_target_x = getattr(self, x_attr)
                                 assessed_creds = sum(
                                     u.credits for u in self.units
                                     if u.credits is not None
                                     and _numeric_mark(u.mark) is not None
                                     and not u.excluded
                                 )
-                                threshold_x = min(assessed_creds * 2 / 3,
-                                                  float(BSC_PROMO_A_CREDITS))
-                                if l3_above_x >= threshold_x:
-                                    if (self.project_mark is not None
-                                            and self.project_mark >= x_hi
-                                            and ym > overall):
-                                        self.deg_class_rev = 'P(B_X)'
-                                    else:
-                                        self.deg_class_rev = 'P(A_X)'
+                                two_thirds = assessed_creds * 2 / 3
+                                if creds_at_target_x >= min(two_thirds, BSC_PROMO_A_CREDITS):
+                                    self.deg_class_rev = 'P(A_X)'
+                                elif (creds_at_target_x >= two_thirds - 10
+                                        and self.project_mark is not None
+                                        and self.project_mark >= x_hi
+                                        and ym > overall):
+                                    self.deg_class_rev = 'P(B_X)'
                     break
 
             # --- fail reason for BSc Fail ---
@@ -1188,8 +1258,10 @@ class StudentInfo:
                     reasons.append('< 40% overall')
                 if l3 < BSC_L3_CREDITS_THIRD:
                     reasons.append(f'< {BSC_L3_CREDITS_THIRD} credits at L3+')
-                if not has_req:
+                if any(c in MUST_PASS_LAB for c in must_pass_failed):
                     reasons.append('Failed lab')
+                if any(c in MUST_PASS_PROJECT for c in must_pass_failed):
+                    reasons.append('Failed project')
                 self.fail_reason = ' / '.join(reasons)
         else:
             # ----- MPhys (4) / MMath (4m) -----
@@ -1220,28 +1292,41 @@ class StudentInfo:
                         cls = '2.2'
                     # short at 2.2 → one below 2.2 → no 3rd class → revert to BSc
 
-            # ----- borderline promotion (analogous to BSc algorithm A) -----
+            # ----- borderline promotion: algorithm A, then algorithm B -----
             # A borderline student (overall within 2% below a class boundary) is
-            # promoted to that class if they passed >= Y4_PROMO_CREDITS Y4
-            # credits at level 3+ achieving at least the target boundary mark.
-            # credits_l3plus_* are computed from the current (Y4) grid only.
+            # promoted to that class by either:
+            #   A: >= Y4_PROMO_A_CREDITS credits (any level) at the target boundary mark;
+            #   B: >= PROMO_B_CREDITS such credits, AND the project at the target level,
+            #      AND yearmark > overall.
+            # Both also require the MPHYS_CREDITS_SHORT credit floor (B's project-at-target
+            # test implies the project is passed).  credits_at_* are from the Y4 grid only.
             # XB/BX in the BZ column widens every band by a further 1.0.
             cls_alg = cls  # pre-promotion class (None ⇒ would revert to BSc)
             bz_codes = _split_codes(self.bz)
             bz_extra = 1.0 if ('XB' in bz_codes or 'BX' in bz_codes) else 0.0
             _MPHYS_ZONES = (
-                ('1',   BOUNDARY_FIRST  - BSC_BORDERLINE_UPPER, BOUNDARY_FIRST,  'credits_l3plus_first'),
-                ('2.1', BOUNDARY_UPPER2 - BSC_BORDERLINE_UPPER, BOUNDARY_UPPER2, 'credits_l3plus_upper2'),
-                ('2.2', BOUNDARY_LOWER2 - BSC_BORDERLINE_UPPER, BOUNDARY_LOWER2, 'credits_l3plus_lower2'),
+                ('1',   BOUNDARY_FIRST  - BSC_BORDERLINE_UPPER, BOUNDARY_FIRST,  'credits_at_first'),
+                ('2.1', BOUNDARY_UPPER2 - BSC_BORDERLINE_UPPER, BOUNDARY_UPPER2, 'credits_at_upper2'),
+                ('2.2', BOUNDARY_LOWER2 - BSC_BORDERLINE_UPPER, BOUNDARY_LOWER2, 'credits_at_lower2'),
             )
-            for target_cls, lo, hi, l3_attr in _MPHYS_ZONES:
+            for target_cls, lo, hi, at_attr in _MPHYS_ZONES:
                 if lo - bz_extra <= overall < hi:
                     self.borderline_for = target_cls
-                    y4_l3plus_at_target = getattr(self, l3_attr)
+                    creds_at_target = getattr(self, at_attr)
+                    try:
+                        ym = float(self.yearmark)
+                    except (TypeError, ValueError):
+                        ym = -1.0
                     if (project_ok and credits >= MPHYS_CREDITS_SHORT
-                            and y4_l3plus_at_target >= Y4_PROMO_CREDITS):
+                            and creds_at_target >= Y4_PROMO_A_CREDITS):
                         cls = target_cls
                         self.deg_class_rev = 'P(A)'
+                    elif (credits >= MPHYS_CREDITS_SHORT
+                            and creds_at_target >= PROMO_B_CREDITS
+                            and self.project_mark is not None and self.project_mark >= hi
+                            and ym > overall):
+                        cls = target_cls
+                        self.deg_class_rev = 'P(B)'
                     else:
                         self.deg_class_rev = 'CR'
                     break
@@ -1298,9 +1383,9 @@ class StudentInfo:
     def calc_referrals(self, classyear):
         """Determine compensation and referrals for non-final-year students.
 
-        A MUST_PASS unit with mark == 39 is treated as a normal zone failure (30-39%)
-        and flows through the same compensation/referral logic as any other unit.
-        A MUST_PASS unit with mark < 39 is an outright fail ('Failed lab').
+        A lab (MUST_PASS_LAB) unit with mark == 39 is treated as a normal zone failure
+        (30-39%) and flows through the same compensation/referral logic as any other unit.
+        A lab unit with mark < 39 is an outright fail ('Failed lab').
 
         Units with EN code 'R2' were already taken as a 2nd attempt; no further
         resit can be offered.  If such a unit has mark < 30%, or is in the zone
@@ -1320,7 +1405,7 @@ class StudentInfo:
         if classyear in FINAL_CLASSYEARS:
             return
 
-        # MUST_PASS units with mark == 39 (and not already at R2 attempt) are
+        # Lab (MUST_PASS_LAB) units with mark == 39 (and not already at R2 attempt) are
         # zone failures, not outright fails.  R2-in-EN labs lose that exception
         # because no further resit can be offered.
         lab_near_pass_idx = set()
@@ -1332,7 +1417,7 @@ class StudentInfo:
             is_r2_en   = 'R2' in en_codes
             if is_r2_en:
                 r2_en_idx.add(idx)
-            if coursename in MUST_PASS and not is_r2_en:
+            if coursename in MUST_PASS_LAB and not is_r2_en:
                 if _numeric_mark(unit.mark) == 39.0:
                     lab_near_pass_idx.add(idx)
 
@@ -1364,7 +1449,7 @@ class StudentInfo:
         # --- Y1/Y2 FAIL checks (all collected so multiple reasons can be combined) ---
         fail_reasons = []
 
-        if any(c in MUST_PASS
+        if any(c in MUST_PASS_LAB
                for idx, c in zip(self.failed_idx, self.failed_courses)
                if idx not in lab_near_pass_idx):
             fail_reasons.append('Failed lab')
@@ -1400,7 +1485,7 @@ class StudentInfo:
 
         self.some_unit_under_30 = some_unit_under_30
 
-        must_pass_for_cy = MUST_PASS | (MUST_PASS_MATHS if classyear == '1m' else frozenset())
+        must_pass_for_cy = MUST_PASS_LAB | (MUST_PASS_MATHS if classyear == '1m' else frozenset())
         core_for_cy      = CORE_PHYSICS | (CORE_MATHS_PHYSICS if classyear in ('1m', '2m')
                                            else frozenset())
 
@@ -1513,7 +1598,7 @@ class StudentInfo:
         self.referred_courses    = referred_courses
 
         if referred_idx:
-            if any((self.units[i].coursename or self.units[i].module) in MUST_PASS
+            if any((self.units[i].coursename or self.units[i].module) in MUST_PASS_LAB
                    for i in referred_idx):
                 self.fail_reason = 'Resit failed lab'
             resit_parts = [f"{c}[1]" for c in self.deferred_courses]
@@ -1629,6 +1714,10 @@ def read_students(filepath):
     # ------------------------------------------------------------------
     # Parse student rows: skip any row where emplid (col 0) is blank
     # ------------------------------------------------------------------
+    # Normalised emplids for the manual study-abroad override (compared as
+    # strings so the list tolerates int or string entries).
+    abroad_emplids = {str(e) for e in abroad_list}
+
     students = []
     for _, row in df.iloc[DATA_START_ROW:].iterrows():
         if pd.isna(row.iloc[0]):
@@ -1638,8 +1727,10 @@ def read_students(filepath):
         for attr, col in _STUDENT_COLS:
             setattr(s, attr, _cell(row, col))
         s.is_mphys_track  = bool(s.plan and ('MPhys' in s.plan or 'MMath' in s.plan))
-        s.is_study_abroad = bool(s.plan and 'MPhys' in s.plan
-                                 and 'study' in s.plan.lower())
+        s.is_study_abroad = (
+            (bool(s.plan) and 'MPhys' in s.plan and 'study' in s.plan.lower())
+            or str(s.emplid) in abroad_emplids
+        )
 
         s.units = [
             UnitInfo(
@@ -1677,7 +1768,7 @@ TRAILING_COLS = {
             'Year Mark', 'Status', 'Fail reason', 'Resits', 'Notes',
             'Pre-Exam Board Minutes', 'Exam Board Minutes'],
     '31':  ['Creds Passed/Taken', 'L3/L4 creds passed', 'Phys 1', 'Phys 2',
-            'BZ', 'Year Mark', 'Overall', 'Status', 'Award', 'Notes',
+            'BZ', 'Year Mark', 'Overall', 'Status', 'Award', 'Fail reason', 'Notes',
             'Pre-Exam Board Minutes', 'Exam Board Minutes'],
     '31m': ['Creds Passed/Taken', 'L3/L4 creds passed', 'Phys 1', 'Phys 2',
             'Phys Year Mark', 'Math Year Mark', 'BZ', 'Year Mark', 'Overall',
@@ -2129,6 +2220,47 @@ def read_cf_flags(filepath):
     return result
 
 
+def read_abroad_file(filepath):
+    """Read study-abroad emplids from the first column of every sheet in *filepath*.
+
+    All sheets are scanned. A cell is kept only if it looks like an emplid
+    (exactly 8 digits); header rows and other non-emplid cells are skipped.
+    Returns a de-duplicated list of int emplids in order of first appearance,
+    or an empty list if the file is missing, disabled (None), or unreadable.
+    """
+    if not filepath:
+        return []
+    try:
+        xl = pd.ExcelFile(filepath)
+    except FileNotFoundError:
+        print(f"  WARNING: abroad file not found — {filepath}")
+        return []
+    except Exception as exc:
+        print(f"  WARNING: could not read abroad file {filepath} — {exc}")
+        return []
+
+    emplids = []
+    seen = set()
+    for sheet in xl.sheet_names:
+        try:
+            df = xl.parse(sheet, header=None, dtype=object)
+        except Exception:
+            continue
+        if df.shape[1] == 0:
+            continue
+        for raw in df.iloc[:, 0]:
+            if pd.isna(raw):
+                continue
+            try:
+                eid = int(float(str(raw).strip()))
+            except (ValueError, TypeError):
+                continue   # skip header / non-numeric cells
+            if len(str(eid)) == 8 and str(eid) not in seen:
+                emplids.append(eid)
+                seen.add(str(eid))
+    return emplids
+
+
 # ===========================================================================
 # Argument parsing
 # ===========================================================================
@@ -2147,10 +2279,10 @@ def _stats_lines(students, cy):
         return ['  (no students)']
 
     _GRADE_ORDER  = {'1': 0, '2.1': 1, '2.2': 2, '3': 3, '3 ord': 4, 'Fail': 5}
-    _PREFIX_ORDER = {'MPhys': 0, 'MMath': 0, 'BSc': 1}
+    _PREFIX_ORDER = {'MPhys': 0, 'MMath': 0, 'MMath&Phys': 0, 'BSc': 1}
     _STATUS_ORDER = {
-        'ACTV': 0, 'A/D': 1, 'REVW': 2, 'R/X': 3,
-        'R/BSc': 4, 'REVW (BSc)': 5, 'FAIL': 99,
+        'ACTV': 0, 'A/D': 1, 'REVW': 2, 'R/X': 3, 'REVW R/X': 4,
+        'REVW (BSc)': 5, 'FAIL': 99,
     }
 
     def _deg_key(cls):
@@ -2301,7 +2433,7 @@ def main():
     # ---- supplementary data files ----
     y3_credits = {}
     if any(cy in ('4', '4m') for cy in classyears):
-        y3cr_path = os.path.join(INDIR, Y3_CREDITS_FILENAME)
+        y3cr_path = os.path.join(INDIR, Y3_CREDITS_FILE)
         y3_credits = read_y3_credits(y3cr_path)
         if y3_credits:
             _out(f"  {_lbl('Y3 credit data')}: {y3cr_path}  ({len(y3_credits)} students)")
@@ -2310,6 +2442,19 @@ def main():
     cf_flags = read_cf_flags(cf_path)
     if cf_flags:
         _out(f"  {_lbl('Carry-forward notes')}: {cf_path}  ({len(cf_flags)} students)")
+
+    # Merge any file-supplied study-abroad emplids into abroad_list (no dups);
+    # read_students reads the global abroad_list, so this must run before the loop.
+    abroad_path = os.path.join(INDIR, ABROAD_FILE) if ABROAD_FILE else None
+    seen_abroad = {str(e) for e in abroad_list}
+    added_abroad = 0
+    for eid in read_abroad_file(abroad_path):
+        if str(eid) not in seen_abroad:
+            abroad_list.append(eid)
+            seen_abroad.add(str(eid))
+            added_abroad += 1
+    if added_abroad:
+        _out(f"  {_lbl('Study-abroad additions')}: {abroad_path}  ({added_abroad} added)")
 
     for cy in classyears:
         infile, outfile = CLASSYEAR_FILES[cy]
