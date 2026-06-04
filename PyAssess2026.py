@@ -3,7 +3,7 @@
 # PyAssess2026.py - generates processed exam grids for Physics@Manchester
 # Author: Clive Dickinson
 # Date: 2026-05-30
-# Version: 1.0 (02-Jun-2026 almost ready for June exams - resits will do over the summer)
+# Version: 1.0 (04-Jun-2026 almost ready for June exams - resits will do over the summer)
 
 # Requirements: 
 # -Python >3.10
@@ -44,9 +44,9 @@ ABROAD_FILE = 'Study abroad 2023-24.xlsx'  # extra study-abroad emplids in its 1
 # processing.  Matched students have their status (progressing years) or
 # Deg Class Alg/Actual (final years) set to the corresponding label, all
 # computed output codes cleared, and resits/fail reasons removed.
-interrupt_list = [11021684,11061389,11064835]   # interrupted studies  → 'Interrupt'
+interrupt_list = [10486912,11085845,11021684,11061389,11064835]   # interrupted studies  → 'Interrupt'
 manual_list    = []   # manual board decision → 'Manual'
-withdrawn_list = [11307037,10895432]   # withdrawn students   → 'Withdrawn'
+withdrawn_list = [9819578,11307037,10895432]   # withdrawn students   → 'Withdrawn'
 
 # Manual study-abroad override: 8-digit emplids of 4-year MPhys/MMath students
 # who spent a year abroad but whose plan string does NOT contain 'study' (so
@@ -243,6 +243,15 @@ def _mark_is_absent(mark):
     return v is None or v < 0
 
 
+def _mark_missing(mark):
+    """Return True if a unit's mark cell is genuinely empty (blank or whitespace).
+
+    Unlike _mark_is_absent this does NOT treat coded values such as 'P'/'F' as
+    missing — those are entered data, not absent data.
+    """
+    return mark is None or (isinstance(mark, str) and not mark.strip())
+
+
 def _norm_eid(v):
     """Normalise an emplid to a plain integer string for comparison."""
     try:
@@ -271,6 +280,41 @@ def _split_codes(value):
 # Mit_circs codes that are specifically actioned in exclude_units().
 # Any code NOT in this set is copied to the output code column as-is.
 _PROCESSED_MIT_CODES = frozenset({'AA', 'EA'})
+
+# 'AB' mit_circs code: a borderline mark-boundary relaxation.  A value such as
+# 'AB -1%' lowers every mark boundary by that many percent when counting this
+# unit's credits toward a level/class (so a 1% shift makes the pass mark 38.95
+# and the first-class mark 68.95).  The shift magnitude must lie in this range.
+AB_SHIFT_MIN = 0.5
+AB_SHIFT_MAX = 2.0
+_AB_CODE_RE = re.compile(r'(?<![A-Z])AB(?![A-Z])')   # 'AB' not embedded in another word
+_AB_NUM_RE  = re.compile(r'-?\d+(?:\.\d+)?')          # first numeric value in the field
+
+
+def _ab_boundary_shift(mit_circs):
+    """Return (shift, warning) for an 'AB' borderline boundary relaxation.
+
+    shift   : positive percent to LOWER every mark boundary by for this unit's
+              credit counting, or 0.0 if no (valid) AB code is present.
+    warning : a message if 'AB' is present but the numeric shift is missing or
+              outside AB_SHIFT_MIN–AB_SHIFT_MAX (in which case shift is 0.0), else None.
+    """
+    if not mit_circs:
+        return 0.0, None
+    text = str(mit_circs)
+    if not _AB_CODE_RE.search(text.upper()):
+        return 0.0, None
+    # Bare 'AB' (no number) is a pre-existing code, not a boundary relaxation —
+    # leave it alone without warning.  Only an 'AB' carrying a numeric value is
+    # treated as the relaxation, and only that value is range-checked.
+    m = _AB_NUM_RE.search(text)
+    if m is None:
+        return 0.0, None
+    shift = abs(float(m.group()))
+    if not (AB_SHIFT_MIN <= shift <= AB_SHIFT_MAX):
+        return 0.0, (f"'AB' shift {shift}% outside expected {AB_SHIFT_MIN}-{AB_SHIFT_MAX}% "
+                     f"range in mit_circs {text!r}; not applied")
+    return shift, None
 
 # Classyears where deferrals (EA) and resits apply.
 _DEFERRAL_CLASSYEARS = frozenset({'1', '1m', '2', '2m'})
@@ -351,7 +395,7 @@ def _mark_suffix(value):
 class UnitInfo:
     """Data for a single unit (module) for one student."""
     __slots__ = ('unit_name', 'module', 'coursename', 'credits', 'mark', 'en', 'mit_circs',
-                 'passed', 'excluded', 'output_code', 'capped')
+                 'passed', 'excluded', 'output_code', 'capped', 'ab_adjust')
 
     def __init__(self, unit_name, module, mark, en, mit_circs):
         self.unit_name   = unit_name              # 'Unit 1', 'Unit 2', etc.
@@ -364,6 +408,7 @@ class UnitInfo:
         self.excluded    = False                  # True if excluded from year mark
         self.output_code = None                   # code(s) written to the output code column
         self.capped      = False                  # True if mark is capped at 30.0 for year mark (R2 attempt)
+        self.ab_adjust   = 0.0                     # 'AB' borderline boundary relaxation (% to lower boundaries by for credit counting)
 
     def __repr__(self):
         return (f'UnitInfo({self.unit_name}, coursename={self.coursename!r}, '
@@ -397,12 +442,12 @@ class StudentInfo:
         'credits_l3_first', 'credits_l3_upper2', 'credits_l3_lower2', 'credits_l3_third',
         'credits_at_first', 'credits_at_upper2', 'credits_at_lower2', 'credits_at_third',
         'overall',
-        'project_mark', 'project_creds',
+        'project_mark', 'project_creds', 'project_ab_adjust',
         'deg_class_alg', 'deg_class_actual',
         'borderline_for', 'deg_class_rev',
         'y3creds_below40_not_excl', 'y3creds_below40_excl', 'y3creds_l4_passed',
         'y3creds_below40',
-        'l3_l4_credits_failed', 'credits_passed_y3y4',
+        'l3_l4_credits_failed', 'credits_passed_y3y4', 'credits_passed_l3l4',
         'y3_creds_failed_str', 'l4_creds_y3y4_str',
         'cf_flags',
     )
@@ -470,6 +515,7 @@ class StudentInfo:
         self.overall             = None   # weighted overall mark across years
         self.project_mark        = None   # credit-weighted average project mark (rounded int), or None
         self.project_creds       = 0      # total project credits
+        self.project_ab_adjust   = 0.0    # 'AB' boundary relaxation applying to the project pass check
         self.deg_class_alg       = None   # algorithmic degree classification, e.g. 'BSc 2.1'
         self.deg_class_actual    = None   # actual degree classification (board may override)
         self.borderline_for      = None   # class student is borderline for, e.g. '1', '2.1'
@@ -479,7 +525,8 @@ class StudentInfo:
         self.y3creds_l4_passed          = None   # Y4 only: L4 credits passed in Y3
         self.y3creds_below40            = None   # Y4 only: total Y3 credits below 40 (not_excl + excl)
         self.l3_l4_credits_failed       = None   # Y4 only: y3creds_below40 + L3+ credits failed in current Y4 grid
-        self.credits_passed_y3y4        = None   # Y4 only: L3+ credits passed over Y3+Y4 = 240 - l3_l4_credits_failed
+        self.credits_passed_y3y4        = None   # Y4 only: any-level credits passed over Y3+Y4 = 240 - l3_l4_credits_failed (info only)
+        self.credits_passed_l3l4        = None   # Y4 only: L3/4/6-only credits passed over Y3+Y4 (level 5 excluded) — used for the award threshold
         self.y3_creds_failed_str        = None   # Y4 only: "not_excl/excl" for 'Y3 creds failed w/wo MCs' column
         self.l4_creds_y3y4_str          = None   # Y4 only: "y3+y4=total" for 'L4 creds passed Y3+Y4' column
         self.cf_flags                   = ''     # carry-forward notes from CF_FLAG_FILE; blank if not matched
@@ -522,6 +569,11 @@ class StudentInfo:
             used_mit   = set()                       # mit codes consumed by a rule
             used_en    = set()                       # EN codes consumed by a rule
             coursename = unit.coursename or unit.module
+
+            # --- 'AB' borderline boundary relaxation (used in credit counting) ---
+            unit.ab_adjust, ab_warn = _ab_boundary_shift(unit.mit_circs)
+            if ab_warn:
+                print(f"  WARNING: {self.emplid} {coursename}: {ab_warn}")
 
             # --- EA deferral (years 1/2 only; highest priority, trumps AA and all other mit codes) ---
             if 'EA' in mit_codes and classyear in _DEFERRAL_CLASSYEARS:
@@ -923,30 +975,33 @@ class StudentInfo:
             mark_num = _numeric_mark(unit.mark)
             if mark_num is None:
                 continue
+            # An 'AB' borderline code lowers the boundaries for this unit, i.e.
+            # raises its effective mark by ab_adjust for the boundary tests below.
+            eff = mark_num + unit.ab_adjust
             level = _course_level(unit.coursename or unit.module)
             if level == 3:
-                if mark_num > PASS_MARK:
+                if eff > PASS_MARK:
                     l3 += unit.credits
-                if mark_num >= BOUNDARY_FIRST:
+                if eff >= BOUNDARY_FIRST:
                     l3_first += unit.credits
-                if mark_num >= BOUNDARY_UPPER2:
+                if eff >= BOUNDARY_UPPER2:
                     l3_upper2 += unit.credits
-                if mark_num >= BOUNDARY_LOWER2:
+                if eff >= BOUNDARY_LOWER2:
                     l3_lower2 += unit.credits
-                if mark_num >= BOUNDARY_THIRD:
+                if eff >= BOUNDARY_THIRD:
                     l3_third += unit.credits
             elif level in (4, 6):
-                if mark_num > PASS_MARK:
+                if eff > PASS_MARK:
                     l4 += unit.credits
             # Credits at each class boundary count ALL current-year units (any
             # level, incl. excluded) — used for borderline promotion (Alg A/B).
-            if mark_num >= BOUNDARY_FIRST:
+            if eff >= BOUNDARY_FIRST:
                 at_first += unit.credits
-            if mark_num >= BOUNDARY_UPPER2:
+            if eff >= BOUNDARY_UPPER2:
                 at_upper2 += unit.credits
-            if mark_num >= BOUNDARY_LOWER2:
+            if eff >= BOUNDARY_LOWER2:
                 at_lower2 += unit.credits
-            if mark_num >= BOUNDARY_THIRD:
+            if eff >= BOUNDARY_THIRD:
                 at_third += unit.credits
         self.credits_l3           = l3
         self.credits_l4           = l4
@@ -1035,44 +1090,51 @@ class StudentInfo:
             return
 
         def _find(name):
-            """Return (numeric_mark, credits) for the first unit matching *name*."""
+            """Return (numeric_mark, credits, ab_adjust) for the first unit matching *name*."""
             for u in self.units:
                 if (u.coursename or u.module or '') == name:
                     m = _numeric_mark(u.mark)
-                    return (m, u.credits)
-            return (None, None)
+                    return (m, u.credits, u.ab_adjust)
+            return (None, None, 0.0)
 
         p1m = p1c = None
         p2m = p2c = None
+        p1ab = p2ab = 0.0
 
         if base == '32':
             # BSc project: Physics dissertation (PHYS3088x) or MATH30022 (Maths+Physics)
             for code in BSC_PROJECT_MODULES:
-                m, c = _find(code)
+                m, c, ab = _find(code)
                 if m is not None:
-                    p1m, p1c = m, c
+                    p1m, p1c, p1ab = m, c, ab
                     break
 
         else:
             # MPhys standard projects (S1 + S2)
-            p1m, p1c = _find('PHYS40181')
-            p2m, p2c = _find('PHYS40182')
+            p1m, p1c, p1ab = _find('PHYS40181')
+            p2m, p2c, p2ab = _find('PHYS40182')
 
             # Physics with Philosophy: PHIL40000 essay (10 cr) fills whichever slot is empty
             if p1m is None:
-                p1m, p1c = _find('PHIL40000')
+                p1m, p1c, p1ab = _find('PHIL40000')
             elif p2m is None:
-                m, c = _find('PHIL40000')
+                m, c, ab = _find('PHIL40000')
                 if m is not None:
-                    p2m, p2c = m, c
+                    p2m, p2c, p2ab = m, c, ab
 
             # MMath: MATH40011 (S1) and/or MATH40022 (S2)
             if p1m is None:
-                p1m, p1c = _find('MATH40011')
+                p1m, p1c, p1ab = _find('MATH40011')
             if p2m is None:
-                m, c = _find('MATH40022')
+                m, c, ab = _find('MATH40022')
                 if m is not None:
-                    p2m, p2c = m, c
+                    p2m, p2c, p2ab = m, c, ab
+
+        # Project AB relaxation: the most generous shift among contributing project units.
+        self.project_ab_adjust = max(
+            (p1ab if p1m is not None else 0.0),
+            (p2ab if p2m is not None else 0.0),
+        )
 
         # Combine into a single credit-weighted project mark
         if p1m is not None and p2m is not None:
@@ -1116,8 +1178,8 @@ class StudentInfo:
 
         For MPhys (classyear 4) / MMath (classyear 4m):
           Class from the overall mark boundary (1/2.1/2.2 — there is no 3rd class)
-          requiring >= MPHYS_CREDITS_FULL credits passed at level 3+ over Y3+Y4
-          (= MPHYS_CREDITS_TOTAL - l3_l4_credits_failed) AND a passed project.
+          requiring >= MPHYS_CREDITS_FULL credits passed at level 3/4/6 over Y3+Y4
+          (credits_passed_l3l4; level 5 does not count) AND a passed project.
           Short on credits by up to 20 (>= MPHYS_CREDITS_SHORT) with a passed project
           drops the class one level.  Borderline promotion (within 2% below a
           boundary) lifts a student one class via algorithm A (>= Y4_PROMO_A_CREDITS
@@ -1148,11 +1210,13 @@ class StudentInfo:
         if base == '32':
             # Must-pass units (lab + project) not passed in this student's list;
             # has_req holds when none failed.
+            # An 'AB' borderline code (u.ab_adjust) lowers the pass mark for that unit.
             must_pass_failed = {
                 (u.coursename or u.module or '')
                 for u in self.units
                 if (u.coursename or u.module or '') in MUST_PASS
-                and not (_numeric_mark(u.mark) is not None and _numeric_mark(u.mark) > PASS_MARK)
+                and not (_numeric_mark(u.mark) is not None
+                         and _numeric_mark(u.mark) + u.ab_adjust > PASS_MARK)
             }
             has_req = not must_pass_failed
             l3 = self.credits_l3 + self.credits_l4   # L3+ passed credits for classification
@@ -1161,14 +1225,18 @@ class StudentInfo:
                 cls = '1'
             elif overall >= BOUNDARY_FIRST and l3 >= BSC_L3_CREDITS_THIRD and has_req:
                 cls = '2.1'   # short on L3 credits by up to 20 → one below 1st
+                self.deg_class_rev = f'L3/L4 creds ({l3})'
             elif overall >= BOUNDARY_UPPER2 and l3 >= BSC_L3_CREDITS_UPPER and has_req:
                 cls = '2.1'
             elif overall >= BOUNDARY_UPPER2 and l3 >= BSC_L3_CREDITS_THIRD and has_req:
                 cls = '2.2'   # short on L3 credits by up to 20 → one below 2.1
+                self.deg_class_rev = f'L3/L4 creds ({l3})'
             elif overall >= BOUNDARY_LOWER2 and l3 >= BSC_L3_CREDITS_UPPER and has_req:
                 cls = '2.2'
             elif overall >= BOUNDARY_THIRD and l3 >= BSC_L3_CREDITS_THIRD and has_req:
                 cls = '3'     # covers one-below-2.2 (short credits) and proper 3rd
+                if overall >= BOUNDARY_LOWER2:   # nominal 2.2 dropped to 3 on short L3 credits
+                    self.deg_class_rev = f'L3/L4 creds ({l3})'
             elif l3 >= BSC_L3_CREDITS_THIRD:
                 cls = '3 ord'
             else:
@@ -1257,7 +1325,7 @@ class StudentInfo:
                 if overall < BOUNDARY_THIRD:
                     reasons.append('< 40% overall')
                 if l3 < BSC_L3_CREDITS_THIRD:
-                    reasons.append(f'< {BSC_L3_CREDITS_THIRD} credits at L3+')
+                    reasons.append(f'<{BSC_L3_CREDITS_THIRD} L3 creds ({l3})')
                 if any(c in MUST_PASS_LAB for c in must_pass_failed):
                     reasons.append('Failed lab')
                 if any(c in MUST_PASS_PROJECT for c in must_pass_failed):
@@ -1265,12 +1333,20 @@ class StudentInfo:
                 self.fail_reason = ' / '.join(reasons)
         else:
             # ----- MPhys (4) / MMath (4m) -----
-            # Credits passed at level 3+ over Y3+Y4 (incl. project), out of 240.
-            credits = self.credits_passed_y3y4
+            # Credits passed at level 3/4/6 over Y3+Y4 (level 5 excluded; incl.
+            # project), out of 240.  credits_passed_y3y4 (any level) is kept for
+            # info; fall back to it, then to the failed-credit subtraction, if the
+            # L3/4/6 figure was not pre-computed.
+            credits = self.credits_passed_l3l4
             if credits is None:
-                credits = MPHYS_CREDITS_TOTAL - (self.l3_l4_credits_failed or 0)
-                self.credits_passed_y3y4 = credits
-            project_ok = self.project_mark is not None and self.project_mark > PASS_MARK
+                credits = self.credits_passed_y3y4
+                if credits is None:
+                    credits = MPHYS_CREDITS_TOTAL - (self.l3_l4_credits_failed or 0)
+                    self.credits_passed_y3y4 = credits
+                self.credits_passed_l3l4 = credits
+            # An 'AB' borderline code on a project unit (project_ab_adjust) lowers the project pass mark.
+            project_ok = (self.project_mark is not None
+                          and self.project_mark + self.project_ab_adjust > PASS_MARK)
 
             # Base honours class from the overall mark boundary plus the credit and
             # project requirement.  Short on credits by up to 20 (and project passed)
@@ -1282,11 +1358,13 @@ class StudentInfo:
                         cls = '1'
                     elif credits >= MPHYS_CREDITS_SHORT:
                         cls = '2.1'   # short on credits → one below 1st
+                        self.deg_class_rev = f'Y3/Y4 creds ({credits})'
                 elif overall >= BOUNDARY_UPPER2:
                     if credits >= MPHYS_CREDITS_FULL:
                         cls = '2.1'
                     elif credits >= MPHYS_CREDITS_SHORT:
                         cls = '2.2'   # short on credits → one below 2.1
+                        self.deg_class_rev = f'Y3/Y4 creds ({credits})'
                 elif overall >= BOUNDARY_LOWER2:
                     if credits >= MPHYS_CREDITS_FULL:
                         cls = '2.2'
@@ -1365,13 +1443,13 @@ class StudentInfo:
                 if not project_ok:
                     fail_reasons.append('Failed project')
                 if overall < BOUNDARY_LOWER2:
-                    fail_reasons.append(f'<{int(BOUNDARY_LOWER2)}% overall')
+                    fail_reasons.append(f'<{round(BOUNDARY_LOWER2)}% overall')
                 else:
                     threshold = (MPHYS_CREDITS_SHORT if overall >= BOUNDARY_UPPER2
                                  else MPHYS_CREDITS_FULL)
                     if credits < threshold:
                         fail_reasons.append(
-                            f'<{threshold} L4 credits ({credits}) passed'
+                            f'<{threshold} Y3/Y4 creds passed ({credits})'
                         )
                 self.fail_reason = ' / '.join(fail_reasons)
 
@@ -1379,6 +1457,10 @@ class StudentInfo:
         self.deg_class_alg = (f'{prefix} {cls_alg}'
                               if self.deg_class_rev in ('P(A)', 'P(B)')
                               else self.deg_class_actual)
+        # A Y3 BSc (incl. Maths+Physics) fail is awarded an exit DipHE; the
+        # algorithmic class (deg_class_alg) still shows the underlying 'BSc Fail'.
+        if base == '32' and cls == 'Fail':
+            self.deg_class_actual = 'DipHE'
 
     def calc_referrals(self, classyear):
         """Determine compensation and referrals for non-final-year students.
@@ -1818,7 +1900,7 @@ _COL_WIDTHS = {
     'Phys Year Mark':           12.00,
     'Math Year Mark':           12.00,
     'Status':                   11.00,
-    'Fail reason':              22.00,
+    'Fail reason':              24.00,
     'Resits':                   50.00,
     'Notes':                    50.00,
     'Pre-Exam Board Minutes':   40.00,
@@ -1848,7 +1930,12 @@ _COL_WIDTHS = {
 _FONT        = Font(name='Aptos Narrow', size=11)
 _FONT_BOLD   = Font(name='Aptos Narrow', size=11, bold=True)
 _FILL_GREY   = PatternFill(fill_type='solid', fgColor='FFE0E0E0')
-_FILL_YELLOW = PatternFill(fill_type='solid', fgColor='FFFFFF00')
+# Cell-highlight fills (see write_students) — medium pastels, brighter than a
+# very-pale wash but softer than pure yellow (FFFF00).
+_FILL_PALE_GREEN  = PatternFill(fill_type='solid', fgColor='FFA9F5A9')  # excluded marks
+_FILL_PALE_YELLOW = PatternFill(fill_type='solid', fgColor='FFFFF066')  # fails: Y1/Y2 in 30-39 zone, and all Y3/Y4 fails
+_FILL_PALE_PINK   = PatternFill(fill_type='solid', fgColor='FFFFB3C6')  # Y1/Y2 fails below MIN_MARK (30%)
+_FILL_BEIGE       = PatternFill(fill_type='solid', fgColor='FFFFD699')  # borderline yearmark / overall (light orange-tan)
 _ALIGN_CTR   = Alignment(horizontal='center')
 _ALIGN_RIGHT = Alignment(horizontal='right')
 _INFO_ROW_H  = 17.0   # height of student info rows
@@ -2006,6 +2093,11 @@ def write_students(students, outpath, classyear):
             _c(info_row, col + 1, None)
             pending_merges.append((info_row, col, col + 1))
 
+        # Borderline (graduating, or progressing e.g. R/X) → beige on the relevant
+        # mark cell: Overall for final years, Year Mark for progressing years.
+        is_borderline = s.borderline_for is not None or 'R/X' in str(s.status or '')
+        beige_tname   = 'Overall' if classyear in FINAL_CLASSYEARS else 'Year Mark'
+
         # info row — trailing columns (computed attrs take priority; fall back to input value)
         for j, tname in enumerate(trailer_names):
             attr  = _TRAILING_ATTR.get(tname)
@@ -2018,19 +2110,30 @@ def write_students(students, outpath, classyear):
                 cell.number_format = fmt
             if value == '-1':
                 cell.alignment = _ALIGN_RIGHT
+            if is_borderline and tname == beige_tname:
+                cell.fill = _FILL_BEIGE
 
         # marks row — fixed columns (blank; needed for fill and borders)
         for i in range(1, n_fixed + 1):
             _c(marks_row, i)
 
         # marks row — unit marks and output codes
-        yellow_set = set(s.failed_idx) | set(s.deferred_idx)
+        # Fill priority: excluded → pale green; else a fail → pale pink (Y1/Y2 below
+        # MIN_MARK) or pale yellow (Y1/Y2 in the 30-39 zone, and all Y3/Y4 fails).
+        is_y12       = classyear in _DEFERRAL_CLASSYEARS   # Y1/Y2 classyears
+        excluded_set = set(s.excluded_idx)
+        failed_set   = set(s.failed_idx)
         for i, unit in enumerate(s.units):
             col = u_start + 2 * i
             mark_cell = _c(marks_row, col, unit.mark)
             mark_num  = _numeric_mark(unit.mark)
-            if i in yellow_set or (mark_num is not None and mark_num <= PASS_MARK):
-                mark_cell.fill = _FILL_YELLOW
+            if i in excluded_set:
+                mark_cell.fill = _FILL_PALE_GREEN
+            elif i in failed_set or (mark_num is not None and mark_num <= PASS_MARK):
+                if is_y12 and mark_num is not None and mark_num < MIN_MARK:
+                    mark_cell.fill = _FILL_PALE_PINK
+                else:
+                    mark_cell.fill = _FILL_PALE_YELLOW
             _c(marks_row, col + 1, unit.output_code)
 
         # marks row — trailing
@@ -2414,6 +2517,33 @@ def resolve_classyears(raw):
 # Main
 # ===========================================================================
 
+def _missing_marks_lines(students):
+    """Return warning lines listing students with genuinely missing unit marks.
+
+    A unit counts as missing only when its mark cell is empty (see _mark_missing).
+    Students on the interrupt/manual/withdrawn lists are skipped entirely.  An
+    absent mark on a year-abroad unit (ABROAD_MODULES) for a study-abroad student,
+    or on a placement unit (PP_MODULES) for a placement student, is expected and
+    ignored; all other units are still checked.  Returns [] if no genuine gaps.
+    """
+    special = {_norm_eid(e) for e in (interrupt_list + manual_list + withdrawn_list)}
+    lines = []
+    for s in students:
+        if _norm_eid(s.emplid) in special:
+            continue
+        missing = []
+        for u in s.units:
+            if u.module is None or not _mark_missing(u.mark):
+                continue
+            code = (u.coursename or '').strip()
+            if (s.is_abroad and code in ABROAD_MODULES) or (s.is_pp and code in PP_MODULES):
+                continue   # absent year-abroad / placement mark is expected
+            missing.append(u.coursename or u.module or u.unit_name or '?')
+        if missing:
+            lines.append(f"    {s.emplid}: {', '.join(missing)}")
+    return lines
+
+
 def main():
     args = parse_args()
     classyears = resolve_classyears(args.classyear)
@@ -2515,7 +2645,7 @@ def main():
                 s.calc_bsc_class_y3mphys(cy)
             if cy in ('4', '4m'):
                 # Y3+Y4 credit accounting must run before calc_deg_class, which uses
-                # credits_passed_y3y4 for MPhys/MMath classification.
+                # credits_passed_l3l4 for MPhys/MMath classification.
                 # Default to 0 for all Y4 students; override from supplementary file where matched.
                 s.y3creds_below40_not_excl = 0
                 s.y3creds_below40_excl     = 0
@@ -2530,17 +2660,33 @@ def main():
                         s.y3creds_below40          = s.y3creds_below40_not_excl + s.y3creds_below40_excl
 
                 # L3+ credits failed in the current Y4 grid (non-excluded units with mark <= PASS_MARK).
+                # An 'AB' borderline code (u.ab_adjust) lowers the pass mark for that unit.
                 grid_failed = sum(
                     u.credits for u in s.units
                     if u.credits is not None
                     and _numeric_mark(u.mark) is not None
-                    and not (_numeric_mark(u.mark) > PASS_MARK)
+                    and not (_numeric_mark(u.mark) + u.ab_adjust > PASS_MARK)
                     and not u.excluded
                     and _course_level(u.coursename or u.module or '') in (3, 4, 5, 6)
                 )
                 s.l3_l4_credits_failed = s.y3creds_below40 + grid_failed
-                # L3+ credits passed over Y3+Y4 (incl. project) for degree classification.
+                # Any-level credits passed over Y3+Y4 (incl. project), kept for info.
                 s.credits_passed_y3y4  = MPHYS_CREDITS_TOTAL - s.l3_l4_credits_failed
+
+                # Passed level-5 credits in the Y4 grid.  Level 5 does not count
+                # toward the MPhys/MMath award credit threshold, so they are removed
+                # to give the L3/4/6-only figure used for classification.  (Y3 is
+                # assumed to contain no level-5 passes — the supplementary Y3 data
+                # provides no level-5 breakdown.)
+                grid_passed_l5 = sum(
+                    u.credits for u in s.units
+                    if u.credits is not None
+                    and _numeric_mark(u.mark) is not None
+                    and _numeric_mark(u.mark) + u.ab_adjust > PASS_MARK
+                    and not u.excluded
+                    and _course_level(u.coursename or u.module or '') == 5
+                )
+                s.credits_passed_l3l4 = s.credits_passed_y3y4 - grid_passed_l5
 
                 # Formatted strings for output columns
                 s.y3_creds_failed_str = (f"{s.y3creds_below40_excl} / "
@@ -2559,9 +2705,10 @@ def main():
 
             # ***For testing/debugging keep this here (comment out when doing actual runs)
             #print(s.emplid, s.name)
-            #if (s.emplid == 11116225):
+            #if (s.emplid == 10638692):
             #    from IPython import embed
             #    embed()
+
         if args.sort_output:
             sort_attr = 'overall' if cy in FINAL_CLASSYEARS else 'yearmark'
             _BOTTOM_LABELS = frozenset({'Manual', 'Interrupt', 'Intercal', 'Withdrawn'})
@@ -2580,6 +2727,14 @@ def main():
 
         for line in _stats_lines(students, cy):
             _out(line)
+
+        # Flag genuinely missing unit marks (skipped when --fill_marks is in use).
+        if args.fill_marks is None:
+            missing = _missing_marks_lines(students)
+            if missing:
+                _out(f"  WARNING: {len(missing)} student(s) with missing marks:")
+                for line in missing:
+                    _out(line)
 
     if errors and multi:
         _out(f"\n{errors} classyear(s) skipped due to missing or unreadable input files.")
