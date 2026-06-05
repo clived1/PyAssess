@@ -30,7 +30,10 @@ from openpyxl.utils import get_column_letter
 # Constants — update as required
 # ===========================================================================
 AY          = 2025                  # Academic year (2025 = AY 2024-25 etc.)
-INDIR       = "data2025_newcodes"   # Directory containing input exam grid spreadsheets
+if (AY == 2025):
+    INDIR       = "data2025_newcodes"   # Directory containing input exam grid spreadsheets
+elif (AY == 2026): 
+    INDIR = "data2026"
 OUTDIR      = "./"                  # Output directory for generated spreadsheets
 SORT_OUTPUT  = False  # Sort output by mark (descending); overridden by --sort
 FILL_MARKS   = None  # Fill blank marks before processing: None = disabled, or a float e.g. 50.0; overridden by --fill_marks
@@ -45,7 +48,7 @@ ABROAD_FILE = 'Study abroad 2023-24.xlsx'  # extra study-abroad emplids in its 1
 # Deg Class Alg/Actual (final years) set to the corresponding label, all
 # computed output codes cleared, and resits/fail reasons removed.
 interrupt_list = [10486912,11085845,11021684,11061389,11064835]   # interrupted studies  → 'Interrupt'
-manual_list    = []   # manual board decision → 'Manual'
+manual_list    = []   # manual filling out/decision → 'Manual'
 withdrawn_list = [9819578,11307037,10895432]   # withdrawn students   → 'Withdrawn'
 
 # Manual study-abroad override: 8-digit emplids of 4-year MPhys/MMath students
@@ -184,7 +187,8 @@ CORE_MATHS_PHYSICS = frozenset({
 #
 # Values: (input_filename, output_filename)
 
-CLASSYEAR_FILES = {
+if (AY == 2025):
+  CLASSYEAR_FILES = {
     '1':   ('PHYS_1241_S2_Y1_Exam_Grids.xlsx',         f'1styear_Physics.AY{AY}.xlsx'),
     '1m':  ('PHYS_1241_S2_Y1_MP_Exam_Grids.xlsx',      f'1styear_MathsPhysics.AY{AY}.xlsx'),
     '2':   ('PHYS_1241_S2_Y2_Exam_Grids.xlsx',         f'2ndyear_Physics.AY{AY}.xlsx'),
@@ -196,6 +200,20 @@ CLASSYEAR_FILES = {
     '4':   ('PHYS_1241_S2_Y4_Exam_Grids.xlsx',         f'FinalYear_MPhys.AY{AY}.xlsx'),
     '4m':  ('PHYS_1241_S2_Y4_MP_Exam_Grids.xlsx',      f'FinalYear_MMath.AY{AY}.xlsx'),
 }
+elif (AY == 2026):
+    CLASSYEAR_FILES = {
+        '1':   ('Y1.xlsx',         f'1styear_Physics.AY{AY}.xlsx'),
+        '1m':  ('Y1_MP.xlsx',      f'1styear_MathsPhysics.AY{AY}.xlsx'),
+        '2':   ('Y2.xlsx',         f'2ndyear_Physics.AY{AY}.xlsx'),
+        '2m':  ('Y2_MP.xlsx',      f'2ndyear_MathsPhysics.AY{AY}.xlsx'),
+        '31':  ('Y3_Prog.xlsx',    f'3rdyear_MPhys.AY{AY}.xlsx'),
+        '31m': ('Y3MP_Prog.xlsx', f'3rdyear_MMath.AY{AY}.xlsx'),
+        '32':  ('Y3_Grad.xlsx',    f'FinalYear_BSc_Physics.AY{AY}.xlsx'),
+        '32m': ('Y3MP_Grad.xlsx', f'FinalYear_BSc_MathsPhysics.AY{AY}.xlsx'),
+        '4':   ('Y4.xlsx',         f'FinalYear_MPhys.AY{AY}.xlsx'),
+        '4m':  ('Y4MP.xlsx',      f'FinalYear_MMath.AY{AY}.xlsx'),
+    }
+
 
 ALL_CLASSYEARS = list(CLASSYEAR_FILES.keys())
 
@@ -265,39 +283,38 @@ def _append_code(existing, new_code):
     return f"{existing}_{new_code}" if existing else new_code
 
 
-_CODE_SPLIT_RE = re.compile(r'[\s,;]+')
+_CODE_SPLIT_RE = re.compile(r'[\s,;/&|]+')
 
 def _split_codes(value):
     """Return a frozenset of individual codes from a field that may hold several.
 
-    Handles space-, comma-, and semicolon-separated values, e.g. 'A, EA' or 'EA AA'.
+    Splits on any run of whitespace, comma, semicolon, slash, ampersand or pipe,
+    so codes are picked up however they are separated, e.g. 'A, EA', 'EA AA' or
+    'AA/EA' all yield the individual codes.
     """
     if not value:
         return frozenset()
     return frozenset(c for c in _CODE_SPLIT_RE.split(str(value).strip()) if c)
 
-
-# Mit_circs codes that are specifically actioned in exclude_units().
-# Any code NOT in this set is copied to the output code column as-is.
-_PROCESSED_MIT_CODES = frozenset({'AA', 'EA'})
-
-# 'AB' mit_circs code: a borderline mark-boundary relaxation.  A value such as
-# 'AB -1%' lowers every mark boundary by that many percent when counting this
-# unit's credits toward a level/class (so a 1% shift makes the pass mark 38.95
-# and the first-class mark 68.95).  The shift magnitude must lie in this range.
+# 'AB' mit_circs code: a borderline overall-mark promotion extension.  A value
+# such as 'AB -1%' beside ANY unit means the student's overall-mark boundary for
+# borderline promotion is extended by that many percent (the magnitude of the
+# number) — exactly like XB/BX in the BZ column, and additive with it.  It does
+# NOT affect the unit it sits beside.  The magnitude must lie in this range.
 AB_SHIFT_MIN = 0.5
 AB_SHIFT_MAX = 2.0
 _AB_CODE_RE = re.compile(r'(?<![A-Z])AB(?![A-Z])')   # 'AB' not embedded in another word
 _AB_NUM_RE  = re.compile(r'-?\d+(?:\.\d+)?')          # first numeric value in the field
 
 
-def _ab_boundary_shift(mit_circs):
-    """Return (shift, warning) for an 'AB' borderline boundary relaxation.
+def _ab_promo_shift(mit_circs):
+    """Return (shift, warning) for an 'AB' overall-mark promotion extension.
 
-    shift   : positive percent to LOWER every mark boundary by for this unit's
-              credit counting, or 0.0 if no (valid) AB code is present.
-    warning : a message if 'AB' is present but the numeric shift is missing or
-              outside AB_SHIFT_MIN–AB_SHIFT_MAX (in which case shift is 0.0), else None.
+    shift   : the percent to extend the overall-mark promotion boundary by
+              (magnitude of the number beside 'AB'), or 0.0 if no (valid) AB
+              code is present.
+    warning : a message if 'AB' is present but the number is missing or outside
+              AB_SHIFT_MIN–AB_SHIFT_MAX (in which case shift is 0.0), else None.
     """
     if not mit_circs:
         return 0.0, None
@@ -395,7 +412,7 @@ def _mark_suffix(value):
 class UnitInfo:
     """Data for a single unit (module) for one student."""
     __slots__ = ('unit_name', 'module', 'coursename', 'credits', 'mark', 'en', 'mit_circs',
-                 'passed', 'excluded', 'output_code', 'capped', 'ab_adjust')
+                 'passed', 'excluded', 'output_code', 'capped')
 
     def __init__(self, unit_name, module, mark, en, mit_circs):
         self.unit_name   = unit_name              # 'Unit 1', 'Unit 2', etc.
@@ -408,7 +425,6 @@ class UnitInfo:
         self.excluded    = False                  # True if excluded from year mark
         self.output_code = None                   # code(s) written to the output code column
         self.capped      = False                  # True if mark is capped at 30.0 for year mark (R2 attempt)
-        self.ab_adjust   = 0.0                     # 'AB' borderline boundary relaxation (% to lower boundaries by for credit counting)
 
     def __repr__(self):
         return (f'UnitInfo({self.unit_name}, coursename={self.coursename!r}, '
@@ -442,12 +458,12 @@ class StudentInfo:
         'credits_l3_first', 'credits_l3_upper2', 'credits_l3_lower2', 'credits_l3_third',
         'credits_at_first', 'credits_at_upper2', 'credits_at_lower2', 'credits_at_third',
         'overall',
-        'project_mark', 'project_creds', 'project_ab_adjust',
+        'project_mark', 'project_creds',
         'deg_class_alg', 'deg_class_actual',
         'borderline_for', 'deg_class_rev',
         'y3creds_below40_not_excl', 'y3creds_below40_excl', 'y3creds_l4_passed',
         'y3creds_below40',
-        'l3_l4_credits_failed', 'credits_passed_y3y4', 'credits_passed_l3l4',
+        'l3_l4_credits_failed', 'credits_passed_y3y4',
         'y3_creds_failed_str', 'l4_creds_y3y4_str',
         'cf_flags',
     )
@@ -515,7 +531,6 @@ class StudentInfo:
         self.overall             = None   # weighted overall mark across years
         self.project_mark        = None   # credit-weighted average project mark (rounded int), or None
         self.project_creds       = 0      # total project credits
-        self.project_ab_adjust   = 0.0    # 'AB' boundary relaxation applying to the project pass check
         self.deg_class_alg       = None   # algorithmic degree classification, e.g. 'BSc 2.1'
         self.deg_class_actual    = None   # actual degree classification (board may override)
         self.borderline_for      = None   # class student is borderline for, e.g. '1', '2.1'
@@ -525,8 +540,7 @@ class StudentInfo:
         self.y3creds_l4_passed          = None   # Y4 only: L4 credits passed in Y3
         self.y3creds_below40            = None   # Y4 only: total Y3 credits below 40 (not_excl + excl)
         self.l3_l4_credits_failed       = None   # Y4 only: y3creds_below40 + L3+ credits failed in current Y4 grid
-        self.credits_passed_y3y4        = None   # Y4 only: any-level credits passed over Y3+Y4 = 240 - l3_l4_credits_failed (info only)
-        self.credits_passed_l3l4        = None   # Y4 only: L3/4/6-only credits passed over Y3+Y4 (level 5 excluded) — used for the award threshold
+        self.credits_passed_y3y4        = None   # Y4 only: any-level credits passed over Y3+Y4 = 240 - l3_l4_credits_failed; used for the award threshold
         self.y3_creds_failed_str        = None   # Y4 only: "not_excl/excl" for 'Y3 creds failed w/wo MCs' column
         self.l4_creds_y3y4_str          = None   # Y4 only: "y3+y4=total" for 'L4 creds passed Y3+Y4' column
         self.cf_flags                   = ''     # carry-forward notes from CF_FLAG_FILE; blank if not matched
@@ -544,6 +558,13 @@ class StudentInfo:
                             in credits_passed.
           AA in mit_circs → excluded from year mark, treated as passed for progression,
                             output_code set to 'X'.
+          AA + a deferral code (EA or CA) both present → early grids carry both an
+                            exclusion and a deferral code; the exam board later resolves
+                            them to one. Until then they are resolved here by result: a
+                            PASSED unit is treated as 'AA', a FAILED unit as the deferral
+                            code (the deferral itself only applies in years 1/2; in years
+                            3/4 a combined code falls back to 'AA'). Both input codes are
+                            copied to the output column (before the action code) for info.
           credits_passed is determined purely by mark (> PASS_MARK), regardless of
           exclusion codes.  Excluded units whose mark does not pass instead count
           toward the progression check via credits_deferred.
@@ -568,45 +589,62 @@ class StudentInfo:
             en_codes   = _split_codes(unit.en)
             used_mit   = set()                       # mit codes consumed by a rule
             used_en    = set()                       # EN codes consumed by a rule
+            action_codes = []                        # codes generated by rules (X, R1, ...), output after input codes
             coursename = unit.coursename or unit.module
 
-            # --- 'AB' borderline boundary relaxation (used in credit counting) ---
-            unit.ab_adjust, ab_warn = _ab_boundary_shift(unit.mit_circs)
-            if ab_warn:
-                print(f"  WARNING: {self.emplid} {coursename}: {ab_warn}")
+            # --- Resolve AA / EA / CA mitigation (incl. combined AA+EA, AA+CA cases) ---
+            # Early grids may carry an exclusion code (AA) AND a deferral code (EA or CA)
+            # together; the board later reduces them to one. Until then resolve by result:
+            # a PASSED unit is treated as 'AA' (excluded), a FAILED unit as the deferral
+            # code. Deferrals only apply in years 1/2; in years 3/4 a combined code falls
+            # back to 'AA'. Both input codes are copied to the output (before the action
+            # code) for info.
+            has_aa        = 'AA' in mit_codes
+            has_ea        = 'EA' in mit_codes
+            has_ca        = 'CA' in mit_codes
+            defer_code    = 'EA' if has_ea else ('CA' if has_ca else None)  # deferral code present (EA preferred)
+            both_aa_defer = has_aa and defer_code is not None
+            num           = _numeric_mark(unit.mark)
+            course_passed = num is not None and num > PASS_MARK
 
-            # --- EA deferral (years 1/2 only; highest priority, trumps AA and all other mit codes) ---
-            if 'EA' in mit_codes and classyear in _DEFERRAL_CLASSYEARS:
+            if both_aa_defer:
+                eff_code = 'AA' if course_passed else defer_code
+            elif defer_code:
+                eff_code = defer_code
+            elif has_aa:
+                eff_code = 'AA'
+            else:
+                eff_code = None
+            if eff_code in ('EA', 'CA') and classyear not in _DEFERRAL_CLASSYEARS:
+                # No deferral outside years 1/2: a combined code becomes AA, a lone deferral is left.
+                eff_code = 'AA' if has_aa else None
+
+            # --- EA / CA deferral (years 1/2 only) ---
+            if eff_code in ('EA', 'CA'):
                 unit.excluded = True
                 unit.passed   = True           # treated as passed for outcome checks
-                if 'XN' in en_codes:           # missed exam → XL_R1
-                    unit.output_code = _append_code(unit.output_code, 'XL_R1')
+                if not both_aa_defer:
+                    used_mit.add(eff_code)     # lone deferral: represented by the action code, not echoed
+                # (combined: leave AA and the deferral code unconsumed so both echo as input codes)
+                if eff_code == 'EA' and 'XN' in en_codes:   # missed exam → XL_R1
+                    action_codes.append('XL_R1')
                     used_en.add('XN')
                 else:
-                    unit.output_code = _append_code(unit.output_code, 'R1')
+                    action_codes.append('R1')
                 excluded += unit.credits
                 excluded_idx.append(idx);  excluded_courses.append(coursename)
                 deferred_idx.append(idx);  deferred_courses.append(coursename)
-                used_mit.update(mit_codes)           # EA trumps: mark all mit codes used
 
-            # --- CA deferral (years 1/2 only) ---
-            elif 'CA' in mit_codes and classyear in _DEFERRAL_CLASSYEARS:
-                unit.excluded = True
-                unit.passed   = True           # treated as passed for outcome checks
-                unit.output_code = _append_code(unit.output_code, 'R1')
-                excluded += unit.credits
-                excluded_idx.append(idx);  excluded_courses.append(coursename)
-                deferred_idx.append(idx);  deferred_courses.append(coursename)
-                used_mit.add('CA')
-
-            # --- AA exclusion ---
-            elif 'AA' in mit_codes:
+            # --- AA exclusion (also the combined AA+EA / AA+CA case when resolved to AA) ---
+            elif eff_code == 'AA':
                 unit.excluded    = True
                 unit.passed      = True           # treated as passed for outcome checks
-                unit.output_code = _append_code(unit.output_code, 'X')
+                if not both_aa_defer:
+                    used_mit.add('AA')         # lone AA: represented by 'X', not echoed
+                # (combined: leave AA and the deferral code unconsumed so both echo as input codes)
+                action_codes.append('X')
                 excluded += unit.credits
                 excluded_idx.append(idx);  excluded_courses.append(coursename)
-                used_mit.add('AA')
 
             # --- L1C/L2C/L3C (carried mark): exclude from year average, treat as passed ---
             elif en_codes & _CARRIED_EN_CODES:
@@ -624,37 +662,35 @@ class StudentInfo:
 
             # --- normal pass/fail (including no mark, which counts as failed) ---
             else:
-                num = _numeric_mark(unit.mark)
-                unit.passed = num is not None and num > PASS_MARK
+                unit.passed = course_passed
                 if not unit.passed:
                     failed_idx.append(idx);  failed_courses.append(coursename)
 
             # --- credit accumulation: purely mark-based for credits_passed ---
             # Excluded units whose mark doesn't pass still count for the progression check.
-            mark_num = _numeric_mark(unit.mark)
-            if mark_num is not None and mark_num > PASS_MARK:
+            if course_passed:
                 passed += unit.credits
             elif unit.excluded:
                 deferred_creds += unit.credits
 
-            # --- copy through any unprocessed EN and mit_circs codes ---
-            # EN codes are prefixed before any action code already set (e.g. XN_X not X_XN).
-            en_passthrough = []
+            # --- assemble output_code: all input codes first, then any action codes ---
+            # Input codes are the unprocessed EN and mit_circs codes carried through for
+            # info; action codes (X, R1, ...) generated by the rules above come after,
+            # e.g. 'XN_X' not 'X_XN', 'AA_EA_R1' not 'R1_AA_EA'.
+            input_codes = []
             for code in sorted(en_codes - used_en):
                 if code == 'R2':
-                    en_passthrough.append('2nd att.')
+                    input_codes.append('2nd att.')
                     # R suffix means already capped externally; otherwise cap at 30 in yearmark.
                     if _mark_suffix(unit.mark) != 'R':
                         unit.capped = True
                 elif code == 'R1':
                     pass  # R1 = 1st-attempt resit; treat as normal, no output annotation
                 else:
-                    en_passthrough.append(code)
-            if en_passthrough:
-                prefix = '_'.join(en_passthrough)
-                unit.output_code = _append_code(prefix, unit.output_code) if unit.output_code else prefix
-            for code in sorted(mit_codes - used_mit - _PROCESSED_MIT_CODES):
-                unit.output_code = _append_code(unit.output_code, code)
+                    input_codes.append(code)
+            input_codes.extend(sorted(mit_codes - used_mit))   # mit codes not consumed by a rule
+            parts = input_codes + action_codes
+            unit.output_code = '_'.join(parts) if parts else None
 
         self.credits_taken      = taken
         self.credits_passed     = passed
@@ -975,9 +1011,7 @@ class StudentInfo:
             mark_num = _numeric_mark(unit.mark)
             if mark_num is None:
                 continue
-            # An 'AB' borderline code lowers the boundaries for this unit, i.e.
-            # raises its effective mark by ab_adjust for the boundary tests below.
-            eff = mark_num + unit.ab_adjust
+            eff = mark_num
             level = _course_level(unit.coursename or unit.module)
             if level == 3:
                 if eff > PASS_MARK:
@@ -1090,51 +1124,43 @@ class StudentInfo:
             return
 
         def _find(name):
-            """Return (numeric_mark, credits, ab_adjust) for the first unit matching *name*."""
+            """Return (numeric_mark, credits) for the first unit matching *name*."""
             for u in self.units:
                 if (u.coursename or u.module or '') == name:
-                    m = _numeric_mark(u.mark)
-                    return (m, u.credits, u.ab_adjust)
-            return (None, None, 0.0)
+                    return (_numeric_mark(u.mark), u.credits)
+            return (None, None)
 
         p1m = p1c = None
         p2m = p2c = None
-        p1ab = p2ab = 0.0
 
         if base == '32':
             # BSc project: Physics dissertation (PHYS3088x) or MATH30022 (Maths+Physics)
             for code in BSC_PROJECT_MODULES:
-                m, c, ab = _find(code)
+                m, c = _find(code)
                 if m is not None:
-                    p1m, p1c, p1ab = m, c, ab
+                    p1m, p1c = m, c
                     break
 
         else:
             # MPhys standard projects (S1 + S2)
-            p1m, p1c, p1ab = _find('PHYS40181')
-            p2m, p2c, p2ab = _find('PHYS40182')
+            p1m, p1c = _find('PHYS40181')
+            p2m, p2c = _find('PHYS40182')
 
             # Physics with Philosophy: PHIL40000 essay (10 cr) fills whichever slot is empty
             if p1m is None:
-                p1m, p1c, p1ab = _find('PHIL40000')
+                p1m, p1c = _find('PHIL40000')
             elif p2m is None:
-                m, c, ab = _find('PHIL40000')
+                m, c = _find('PHIL40000')
                 if m is not None:
-                    p2m, p2c, p2ab = m, c, ab
+                    p2m, p2c = m, c
 
             # MMath: MATH40011 (S1) and/or MATH40022 (S2)
             if p1m is None:
-                p1m, p1c, p1ab = _find('MATH40011')
+                p1m, p1c = _find('MATH40011')
             if p2m is None:
-                m, c, ab = _find('MATH40022')
+                m, c = _find('MATH40022')
                 if m is not None:
-                    p2m, p2c, p2ab = m, c, ab
-
-        # Project AB relaxation: the most generous shift among contributing project units.
-        self.project_ab_adjust = max(
-            (p1ab if p1m is not None else 0.0),
-            (p2ab if p2m is not None else 0.0),
-        )
+                    p2m, p2c = m, c
 
         # Combine into a single credit-weighted project mark
         if p1m is not None and p2m is not None:
@@ -1151,6 +1177,31 @@ class StudentInfo:
         else:
             self.project_mark  = None
             self.project_creds = 0
+
+    def _promo_boundary_extra(self):
+        """Percent to extend each borderline-promotion zone's lower bound by.
+
+        XB/BX in the BZ column contributes a fixed 1.0; an 'AB -n%' code beside
+        any unit contributes n (the number beside it).  The two sources add
+        together.  A single AB value is expected per student (repeated across
+        units is fine); the largest is used, and a warning is printed only if the
+        AB codes disagree on the value.
+        """
+        bz_codes = _split_codes(self.bz)
+        extra = 1.0 if ('XB' in bz_codes or 'BX' in bz_codes) else 0.0
+        ab_shifts = []
+        for u in self.units:
+            shift, warn = _ab_promo_shift(u.mit_circs)
+            if warn:
+                print(f"  WARNING: {self.emplid} {u.coursename or u.module}: {warn}")
+            if shift:
+                ab_shifts.append(shift)
+        if len(set(ab_shifts)) > 1:
+            print(f"  WARNING: {self.emplid}: conflicting 'AB' values {ab_shifts}; "
+                  f"using largest ({max(ab_shifts)})")
+        if ab_shifts:
+            extra += max(ab_shifts)
+        return extra
 
     def calc_deg_class(self, classyear):
         """Set deg_class_alg, deg_class_actual, borderline_for, and deg_class_rev.
@@ -1178,8 +1229,8 @@ class StudentInfo:
 
         For MPhys (classyear 4) / MMath (classyear 4m):
           Class from the overall mark boundary (1/2.1/2.2 — there is no 3rd class)
-          requiring >= MPHYS_CREDITS_FULL credits passed at level 3/4/6 over Y3+Y4
-          (credits_passed_l3l4; level 5 does not count) AND a passed project.
+          requiring >= MPHYS_CREDITS_FULL credits passed at any level over Y3+Y4
+          (credits_passed_y3y4) AND a passed project.
           Short on credits by up to 20 (>= MPHYS_CREDITS_SHORT) with a passed project
           drops the class one level.  Borderline promotion (within 2% below a
           boundary) lifts a student one class via algorithm A (>= Y4_PROMO_A_CREDITS
@@ -1199,6 +1250,7 @@ class StudentInfo:
             prefix = 'MMath&Phys'
         else:
             return
+        orig_prefix = prefix   # programme prefix before any revert-to-BSc (MPhys/MMath fail)
 
         try:
             overall = float(self.overall)
@@ -1210,13 +1262,12 @@ class StudentInfo:
         if base == '32':
             # Must-pass units (lab + project) not passed in this student's list;
             # has_req holds when none failed.
-            # An 'AB' borderline code (u.ab_adjust) lowers the pass mark for that unit.
             must_pass_failed = {
                 (u.coursename or u.module or '')
                 for u in self.units
                 if (u.coursename or u.module or '') in MUST_PASS
                 and not (_numeric_mark(u.mark) is not None
-                         and _numeric_mark(u.mark) + u.ab_adjust > PASS_MARK)
+                         and _numeric_mark(u.mark) > PASS_MARK)
             }
             has_req = not must_pass_failed
             l3 = self.credits_l3 + self.credits_l4   # L3+ passed credits for classification
@@ -1246,11 +1297,11 @@ class StudentInfo:
             # Each zone maps (target class, lower bound, upper bound, credits-at-boundary attr).
             # credits_at_* count all current-year credits (any level) at the boundary mark,
             # including excluded units (computed in calc_level_credits).
-            # XB/BX in the BZ column extends every zone's lower bound by a further 1.0.
+            # XB/BX in the BZ column (1.0) plus any 'AB -n%' unit code (n) extend
+            # every zone's lower bound (see _promo_boundary_extra).
             cls_before_promo = cls   # base classification before any borderline promotion
             cls_alg = cls_before_promo
-            bz_codes = _split_codes(self.bz)
-            bz_extra = 1.0 if ('XB' in bz_codes or 'BX' in bz_codes) else 0.0
+            bz_extra = self._promo_boundary_extra()
             _BORDERLINE_ZONES = (
                 ('1',   BOUNDARY_FIRST  - BSC_BORDERLINE_UPPER, BOUNDARY_FIRST,  'credits_at_first'),
                 ('2.1', BOUNDARY_UPPER2 - BSC_BORDERLINE_UPPER, BOUNDARY_UPPER2, 'credits_at_upper2'),
@@ -1333,20 +1384,15 @@ class StudentInfo:
                 self.fail_reason = ' / '.join(reasons)
         else:
             # ----- MPhys (4) / MMath (4m) -----
-            # Credits passed at level 3/4/6 over Y3+Y4 (level 5 excluded; incl.
-            # project), out of 240.  credits_passed_y3y4 (any level) is kept for
-            # info; fall back to it, then to the failed-credit subtraction, if the
-            # L3/4/6 figure was not pre-computed.
-            credits = self.credits_passed_l3l4
+            # Any-level credits passed over Y3+Y4 (incl. project), out of 240, used
+            # for the MPHYS_CREDITS_FULL/SHORT thresholds.  Fall back to the
+            # failed-credit subtraction if it was not pre-computed.
+            credits = self.credits_passed_y3y4
             if credits is None:
-                credits = self.credits_passed_y3y4
-                if credits is None:
-                    credits = MPHYS_CREDITS_TOTAL - (self.l3_l4_credits_failed or 0)
-                    self.credits_passed_y3y4 = credits
-                self.credits_passed_l3l4 = credits
-            # An 'AB' borderline code on a project unit (project_ab_adjust) lowers the project pass mark.
+                credits = MPHYS_CREDITS_TOTAL - (self.l3_l4_credits_failed or 0)
+                self.credits_passed_y3y4 = credits
             project_ok = (self.project_mark is not None
-                          and self.project_mark + self.project_ab_adjust > PASS_MARK)
+                          and self.project_mark > PASS_MARK)
 
             # Base honours class from the overall mark boundary plus the credit and
             # project requirement.  Short on credits by up to 20 (and project passed)
@@ -1378,10 +1424,10 @@ class StudentInfo:
             #      AND yearmark > overall.
             # Both also require the MPHYS_CREDITS_SHORT credit floor (B's project-at-target
             # test implies the project is passed).  credits_at_* are from the Y4 grid only.
-            # XB/BX in the BZ column widens every band by a further 1.0.
+            # XB/BX in the BZ column (1.0) plus any 'AB -n%' unit code (n) widen
+            # every band's lower bound (see _promo_boundary_extra).
             cls_alg = cls  # pre-promotion class (None ⇒ would revert to BSc)
-            bz_codes = _split_codes(self.bz)
-            bz_extra = 1.0 if ('XB' in bz_codes or 'BX' in bz_codes) else 0.0
+            bz_extra = self._promo_boundary_extra()
             _MPHYS_ZONES = (
                 ('1',   BOUNDARY_FIRST  - BSC_BORDERLINE_UPPER, BOUNDARY_FIRST,  'credits_at_first'),
                 ('2.1', BOUNDARY_UPPER2 - BSC_BORDERLINE_UPPER, BOUNDARY_UPPER2, 'credits_at_upper2'),
@@ -1454,9 +1500,19 @@ class StudentInfo:
                 self.fail_reason = ' / '.join(fail_reasons)
 
         self.deg_class_actual = f'{prefix} {cls}'
-        self.deg_class_alg = (f'{prefix} {cls_alg}'
-                              if self.deg_class_rev in ('P(A)', 'P(B)')
-                              else self.deg_class_actual)
+        if base == '4' and prefix == 'BSc':
+            # MPhys/MMath failed the honours criteria and reverted to a BSc on the
+            # first three years.  The algorithmic column shows the original programme's
+            # fail; the actual column shows the awarded BSc class (e.g. 'BSc 2.2').
+            self.deg_class_alg = f'{orig_prefix} Fail'
+        elif self.deg_class_rev == 'P(B)':
+            # Algorithm B promotion: the algorithmic column keeps the nominal
+            # (pre-promotion) class; the actual column shows the promoted class.
+            self.deg_class_alg = f'{prefix} {cls_alg}'
+        else:
+            # No promotion, or Algorithm A promotion (which is itself algorithmic):
+            # both columns show the same (promoted, where applicable) class.
+            self.deg_class_alg = self.deg_class_actual
         # A Y3 BSc (incl. Maths+Physics) fail is awarded an exit DipHE; the
         # algorithmic class (deg_class_alg) still shows the underlying 'BSc Fail'.
         if base == '32' and cls == 'Fail':
@@ -2645,7 +2701,7 @@ def main():
                 s.calc_bsc_class_y3mphys(cy)
             if cy in ('4', '4m'):
                 # Y3+Y4 credit accounting must run before calc_deg_class, which uses
-                # credits_passed_l3l4 for MPhys/MMath classification.
+                # credits_passed_y3y4 for MPhys/MMath classification.
                 # Default to 0 for all Y4 students; override from supplementary file where matched.
                 s.y3creds_below40_not_excl = 0
                 s.y3creds_below40_excl     = 0
@@ -2660,33 +2716,18 @@ def main():
                         s.y3creds_below40          = s.y3creds_below40_not_excl + s.y3creds_below40_excl
 
                 # L3+ credits failed in the current Y4 grid (non-excluded units with mark <= PASS_MARK).
-                # An 'AB' borderline code (u.ab_adjust) lowers the pass mark for that unit.
                 grid_failed = sum(
                     u.credits for u in s.units
                     if u.credits is not None
                     and _numeric_mark(u.mark) is not None
-                    and not (_numeric_mark(u.mark) + u.ab_adjust > PASS_MARK)
+                    and not (_numeric_mark(u.mark) > PASS_MARK)
                     and not u.excluded
                     and _course_level(u.coursename or u.module or '') in (3, 4, 5, 6)
                 )
                 s.l3_l4_credits_failed = s.y3creds_below40 + grid_failed
-                # Any-level credits passed over Y3+Y4 (incl. project), kept for info.
+                # Any-level credits passed over Y3+Y4 (incl. project), out of 240,
+                # used for the MPhys/MMath award credit threshold.
                 s.credits_passed_y3y4  = MPHYS_CREDITS_TOTAL - s.l3_l4_credits_failed
-
-                # Passed level-5 credits in the Y4 grid.  Level 5 does not count
-                # toward the MPhys/MMath award credit threshold, so they are removed
-                # to give the L3/4/6-only figure used for classification.  (Y3 is
-                # assumed to contain no level-5 passes — the supplementary Y3 data
-                # provides no level-5 breakdown.)
-                grid_passed_l5 = sum(
-                    u.credits for u in s.units
-                    if u.credits is not None
-                    and _numeric_mark(u.mark) is not None
-                    and _numeric_mark(u.mark) + u.ab_adjust > PASS_MARK
-                    and not u.excluded
-                    and _course_level(u.coursename or u.module or '') == 5
-                )
-                s.credits_passed_l3l4 = s.credits_passed_y3y4 - grid_passed_l5
 
                 # Formatted strings for output columns
                 s.y3_creds_failed_str = (f"{s.y3creds_below40_excl} / "
