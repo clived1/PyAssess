@@ -398,6 +398,36 @@ def _numeric_mark(value):
     except (TypeError, ValueError):
         return None
 
+def _is_mc_excluded(output_code):
+    """True if *output_code* carries a standalone 'X' token.
+
+    The 'X' action code marks a unit excluded by mitigating circumstances (an AA
+    in mit_circs).  A deferral ('R1', 'XL_R1', ...) or a carried mark ('L1C',
+    'L2C', 'L3C') is also excluded from the year mark but does NOT carry a lone
+    'X', so those marks are not highlighted green.  Splitting on '_' keeps 'XL_R1'
+    (a deferral) and 'XN' (missed exam) from matching, while 'XN_X', 'AA_EA_X'
+    etc. correctly do.
+    """
+    return 'X' in (output_code or '').split('_')
+
+
+def _raw_input_codes(unit):
+    """Display string of a unit's raw input codes (EN + mit_circs).
+
+    The 'R1' / 'R2' resit markers are dropped but every other code is kept, in
+    order.  Used for completed / withdrawn / interrupted / manual / intercalating
+    students, who are not reassessed and so carry no computed action codes.
+    str.split() handles the stray non-breaking spaces seen in mit_circs values.
+    """
+    tokens = [
+        tok
+        for field in (unit.en, unit.mit_circs) if field
+        for tok in str(field).split()
+        if tok.upper() not in ('R1', 'R2')
+    ]
+    return ' '.join(tokens) or None
+
+
 def _mark_suffix(value):
     """Return the letter suffix of a mark value in upper case, or '' if none.
 
@@ -438,6 +468,7 @@ class StudentInfo:
         'emplid', 'name', 'id_no', 'uf', 'mc', 'bz',
         'admit_term', 'entry_type', 'psi', 'plan', 'is_mphys_track', 'is_study_abroad',
         'is_pp', 'is_abroad',
+        'AS_code', 'RFYR', 'RYOA', 'RYIA', 'COMP',
         'units_passed', 'award', 'classification',
         'units', 'trailing',
         'yearmark',
@@ -483,6 +514,11 @@ class StudentInfo:
         self.is_study_abroad = False  # True if year-abroad (plan has 'study', or in abroad_list)
         self.is_pp           = False  # True if student has a professional placement unit
         self.is_abroad       = False  # True if student has a year abroad unit
+        self.AS_code         = None   # raw 'AS Code' column value (e.g. 'ACTV', 'RFYR', 'EXIT')
+        self.RFYR            = False  # True if AS_code is RFYR (repeat first year → Interrupt)
+        self.RYOA            = False  # True if AS_code is RYOA (repeat year out abroad → Interrupt)
+        self.RYIA            = False  # True if AS_code is RYIA (repeat year in attendance → Interrupt)
+        self.COMP            = False  # True if AS_code is COMP (completed); recorded only, no special handling
         self.units_passed   = None
         self.award          = None
         self.classification = None
@@ -799,6 +835,23 @@ class StudentInfo:
                     # No deferrals or referrals (ACTV)
                     self.status = 'R/X' if borderline else 'BSc'
 
+        # Y2 CertHE: a failing Y2 student is awarded a Certificate of Higher
+        # Education.  Status becomes 'FAIL (CertHE)' rather than plain 'FAIL'.
+        if self.status == 'FAIL' and self.y2_certhe_eligible(classyear):
+            self.status = 'FAIL (CertHE)'
+
+    def y2_certhe_eligible(self, classyear):
+        """True if a Y2 student qualifies for a Certificate of Higher Education.
+
+        Requires that the student is NOT a direct entrant (L1CM is a real mark,
+        not the -1 'no Year-1 mark' sentinel) and is NOT carrying credits
+        (registered for exactly 120 credits in Y2).
+        """
+        if classyear not in ('2', '2m') or self.credits_taken != 120:
+            return False
+        l1cm = _numeric_mark(self.phys1)
+        return l1cm is not None and l1cm >= 0
+
     def calc_bsc_class_y3mphys(self, classyear):
         """Check Y3→Y4 progression for MPhys/MMath students (classyear 31/31m).
 
@@ -872,15 +925,15 @@ class StudentInfo:
             reasons.append(prior_reason)
         creds = self.credits_passed or 0
         if creds < MPHYS_Y3_PROG_CREDITS:
-            reasons.append(f'<{MPHYS_Y3_PROG_CREDITS} credits ({creds})')
+            reasons.append(f'< {MPHYS_Y3_PROG_CREDITS} credits ({creds})')
         if not (ym > MPHYS_Y3_PROG_YEARMARK):
-            reasons.append(f'yearmark <{int(MPHYS_Y3_PROG_YEARMARK + 0.5)}')
+            reasons.append(f'yearmark < {int(MPHYS_Y3_PROG_YEARMARK + 0.5)}')
         if not (ov > MPHYS_Y3_PROG_OVERALL):
-            reasons.append(f'overallmark <{int(MPHYS_Y3_PROG_OVERALL + 0.5)}')
+            reasons.append(f'overallmark < {int(MPHYS_Y3_PROG_OVERALL + 0.5)}')
         if not phys_ok:
-            reasons.append(f'Phys average <{int(MPHYS_Y3_PROG_PHYS_MATH_MARK + 0.5)}')
+            reasons.append(f'Phys average < {int(MPHYS_Y3_PROG_PHYS_MATH_MARK + 0.5)}')
         if not math_ok:
-            reasons.append(f'Maths average <{int(MPHYS_Y3_PROG_PHYS_MATH_MARK + 0.5)}')
+            reasons.append(f'Maths average < {int(MPHYS_Y3_PROG_PHYS_MATH_MARK + 0.5)}')
         if lab_failed and not any('lab' in r.lower() for r in reasons):
             reasons.append('Failed lab')
         self.fail_reason = ' / '.join(reasons)
@@ -897,19 +950,26 @@ class StudentInfo:
             self.trailing['Award'] = bsc_class
 
     def apply_special_status(self, classyear):
-        """Override classification/status for interrupted, manual, or withdrawn students.
+        """Override classification/status for completed, interrupted, manual or
+        withdrawn students.
 
-        If the student's emplid is in interrupt_list, manual_list, or withdrawn_list:
+        A student flagged self.COMP (AS code 'COMP') has already completed and is
+        not reassessed: 'Completed' is written to status, deg_class_alg and
+        deg_class_actual.  Otherwise, if the student's emplid is in interrupt_list,
+        manual_list, or withdrawn_list:
           - Progressing years: sets self.status to the label.
           - Final years: sets deg_class_alg and deg_class_actual to the label.
         In all cases clears resits, fail_reason, deg_class_rev, borderline_for,
         and replaces every unit's output_code with the raw EN + mit_circs values
-        from the input (no computed action codes).
-        Returns True if the student matched a list, False otherwise.
+        from the input (no computed action codes).  The credits and averages
+        computed earlier (creds_passed_taken, yearmark, overall, ...) are kept.
+        Returns True if the student matched, False otherwise.
         """
         eid = _norm_eid(self.emplid)
         _norm = lambda lst: {_norm_eid(e) for e in lst}
-        if   eid in _norm(interrupt_list):
+        if   self.COMP:
+            label = 'Completed'
+        elif eid in _norm(interrupt_list):
             label = 'Interrupt'
         elif eid in _norm(manual_list):
             label = 'Manual'
@@ -918,13 +978,24 @@ class StudentInfo:
         else:
             return False
 
-        if classyear in FINAL_CLASSYEARS:
+        if label == 'Completed':
+            # Already completed: mark every outcome column 'Completed'.  The marks,
+            # raw output codes and the credits/averages set earlier are retained.
+            self.status           = label
+            self.deg_class_alg    = label
+            self.deg_class_actual = label
+            self.deg_class_rev    = None
+            self.borderline_for   = None
+        elif classyear in FINAL_CLASSYEARS:
             self.deg_class_alg    = label
             self.deg_class_actual = label
             self.deg_class_rev    = None
             self.borderline_for   = None
         else:
             self.status = label
+            # A withdrawn Y2 student may still qualify for a CertHE exit award.
+            if label == 'Withdrawn' and self.y2_certhe_eligible(classyear):
+                self.status = 'Withdrawn (CertHE)'
 
         self.resits   = None
         if label == 'Withdrawn':
@@ -935,10 +1006,7 @@ class StudentInfo:
             self.fail_reason = ''
 
         for unit in self.units:
-            raw = ' '.join(
-                str(c).strip() for c in (unit.en, unit.mit_circs) if c
-            )
-            unit.output_code = raw or None
+            unit.output_code = _raw_input_codes(unit)
 
         return True
 
@@ -983,8 +1051,7 @@ class StudentInfo:
         self.fail_reason = ''
 
         for unit in self.units:
-            raw = ' '.join(str(c).strip() for c in (unit.en, unit.mit_circs) if c)
-            unit.output_code = raw or None
+            unit.output_code = _raw_input_codes(unit)
 
     def calc_level_credits(self):
         """Count passed credits at level 3 and level 4 (level 6 treated as level 4; level 5 excluded).
@@ -1376,7 +1443,7 @@ class StudentInfo:
                 if overall < BOUNDARY_THIRD:
                     reasons.append('< 40% overall')
                 if l3 < BSC_L3_CREDITS_THIRD:
-                    reasons.append(f'<{BSC_L3_CREDITS_THIRD} L3 creds ({l3})')
+                    reasons.append(f'< {BSC_L3_CREDITS_THIRD} L3 creds ({l3})')
                 if any(c in MUST_PASS_LAB for c in must_pass_failed):
                     reasons.append('Failed lab')
                 if any(c in MUST_PASS_PROJECT for c in must_pass_failed):
@@ -1489,13 +1556,13 @@ class StudentInfo:
                 if not project_ok:
                     fail_reasons.append('Failed project')
                 if overall < BOUNDARY_LOWER2:
-                    fail_reasons.append(f'<{round(BOUNDARY_LOWER2)}% overall')
+                    fail_reasons.append(f'< {round(BOUNDARY_LOWER2)}% overall')
                 else:
                     threshold = (MPHYS_CREDITS_SHORT if overall >= BOUNDARY_UPPER2
                                  else MPHYS_CREDITS_FULL)
                     if credits < threshold:
                         fail_reasons.append(
-                            f'<{threshold} Y3/Y4 creds passed ({credits})'
+                            f'< {threshold} Y3/Y4 creds passed ({credits})'
                         )
                 self.fail_reason = ' / '.join(fail_reasons)
 
@@ -1513,10 +1580,21 @@ class StudentInfo:
             # No promotion, or Algorithm A promotion (which is itself algorithmic):
             # both columns show the same (promoted, where applicable) class.
             self.deg_class_alg = self.deg_class_actual
-        # A Y3 BSc (incl. Maths+Physics) fail is awarded an exit DipHE; the
-        # algorithmic class (deg_class_alg) still shows the underlying 'BSc Fail'.
+        # A Y3 BSc (incl. Maths+Physics) fail is awarded an exit DipHE provided
+        # the student is NOT a direct entrant into Y2 (L2CM is a real mark, not
+        # the -1 'no Year-2 mark' sentinel) and is registered for a standard load
+        # of 120 or 125 credits.  The algorithmic class (deg_class_alg) still
+        # shows the underlying 'BSc Fail'.  A student who does not qualify for the
+        # DipHE keeps 'FAIL' in the actual column.
+        #
+        # This is NOT applied to Y4 (base '4'): an MPhys/MMath student who fails
+        # the masters reverts to a BSc on the first three years, which is the
+        # floor outcome, so a Y4 fail never falls through to a DipHE.
         if base == '32' and cls == 'Fail':
-            self.deg_class_actual = 'DipHE'
+            l2cm = _numeric_mark(self.phys2)
+            diphe_eligible = (l2cm is not None and l2cm >= 0
+                              and self.credits_taken in (120, 125))
+            self.deg_class_actual = 'DipHE' if diphe_eligible else 'FAIL'
 
     def calc_referrals(self, classyear):
         """Determine compensation and referrals for non-final-year students.
@@ -1559,11 +1637,18 @@ class StudentInfo:
                 if _numeric_mark(unit.mark) == 39.0:
                     lab_near_pass_idx.add(idx)
 
+        # A lab on exactly 39 is offered a partial (coursework-only) resit, not a
+        # full resit, so its credits are NOT treated as failed for the 60-credit
+        # progression threshold below.  They are still excluded from
+        # credits_passed, so 'Creds Passed/Taken' is unchanged.
+        lab_near_pass_creds = sum(self.units[idx].credits or 0
+                                  for idx in lab_near_pass_idx)
+
         if classyear not in _DEFERRAL_CLASSYEARS:
             # Y3 progressing.
-            if (self.credits_passed or 0) + self.credits_deferred < MIN_PASS_CREDITS:
+            if (self.credits_passed or 0) + self.credits_deferred + lab_near_pass_creds < MIN_PASS_CREDITS:
                 self.fail        = True
-                self.fail_reason = '<60 credits'
+                self.fail_reason = '< 60 credits'
                 return
             # Refer lab=39 as R2; no other compensation logic yet.
             if lab_near_pass_idx:
@@ -1592,15 +1677,15 @@ class StudentInfo:
                if idx not in lab_near_pass_idx):
             fail_reasons.append('Failed lab')
 
-        if (self.credits_passed or 0) + self.credits_deferred < MIN_PASS_CREDITS:
-            fail_reasons.append('<60 credits')
+        if (self.credits_passed or 0) + self.credits_deferred + lab_near_pass_creds < MIN_PASS_CREDITS:
+            fail_reasons.append('< 60 credits')
 
         # R2-in-EN units with mark < 30%: no resit available.
         for idx in r2_en_idx:
             unit = self.units[idx]
             mark = _numeric_mark(unit.mark) or 0.0
             if not (mark > MIN_MARK):
-                fail_reasons.append('Failed (<30%) 2nd attempts')
+                fail_reasons.append('Failed (< 30%) 2nd attempts')
                 break
 
         if fail_reasons:
@@ -1642,7 +1727,7 @@ class StudentInfo:
                 if coursename in must_pass_for_cy:
                     if idx in r2_en_idx:
                         self.fail        = True
-                        self.fail_reason = 'Failed (<30%) 2nd attempts'
+                        self.fail_reason = 'Failed (< 30%) 2nd attempts'
                         return
                     unit.output_code = _append_code(unit.output_code, 'R2')
                     referred_idx.append(idx)
@@ -1667,7 +1752,7 @@ class StudentInfo:
                     # already caught by pre-check if R2-in-EN, but defensive
                     if idx in r2_en_idx:
                         self.fail        = True
-                        self.fail_reason = 'Failed (<30%) 2nd attempts'
+                        self.fail_reason = 'Failed (< 30%) 2nd attempts'
                         return
                     unit.output_code = _append_code(unit.output_code, 'R2')
                     referred_idx.append(idx)
@@ -1678,7 +1763,7 @@ class StudentInfo:
                     if coursename in core_for_cy or coursename in must_pass_for_cy:
                         if idx in r2_en_idx:
                             self.fail        = True
-                            self.fail_reason = 'Failed (<30%) 2nd attempts'
+                            self.fail_reason = 'Failed (< 30%) 2nd attempts'
                             return
                         unit.output_code = _append_code(unit.output_code, 'R2')
                         referred_idx.append(idx)
@@ -1695,7 +1780,7 @@ class StudentInfo:
                     else:
                         if idx in r2_en_idx:
                             self.fail        = True
-                            self.fail_reason = 'Failed (<30%) 2nd attempts'
+                            self.fail_reason = 'Failed (< 30%) 2nd attempts'
                             return
                         unit.output_code = _append_code(unit.output_code, 'R2')
                         referred_idx.append(idx)
@@ -1712,7 +1797,7 @@ class StudentInfo:
                 if coursename in core_for_cy or coursename in must_pass_for_cy:
                     if idx in r2_en_idx:
                         self.fail        = True
-                        self.fail_reason = 'Failed (<30%) 2nd attempts'
+                        self.fail_reason = 'Failed (< 30%) 2nd attempts'
                         return
                     unit.output_code = _append_code(unit.output_code, 'R2')
                     referred_idx.append(idx)
@@ -1883,6 +1968,14 @@ def read_students(filepath):
 
         s.trailing = {name: _cell(row, c) for c, name in trailing_cols}
 
+        # 'AS Code' (Achievement Status) column → dedicated field plus flags.
+        s.AS_code = s.trailing.get('AS Code')
+        as_code   = str(s.AS_code).strip().upper() if s.AS_code is not None else ''
+        s.RFYR    = 'RFYR' in as_code   # repeat first year        → Interrupt
+        s.RYOA    = 'RYOA' in as_code   # repeat year out abroad   → Interrupt
+        s.RYIA    = 'RYIA' in as_code   # repeat year in attendance → Interrupt
+        s.COMP    = 'COMP' in as_code   # completed; recorded only, no special handling
+
         students.append(s)
 
     return students
@@ -1988,10 +2081,28 @@ _FONT_BOLD   = Font(name='Aptos Narrow', size=11, bold=True)
 _FILL_GREY   = PatternFill(fill_type='solid', fgColor='FFE0E0E0')
 # Cell-highlight fills (see write_students) — medium pastels, brighter than a
 # very-pale wash but softer than pure yellow (FFFF00).
-_FILL_PALE_GREEN  = PatternFill(fill_type='solid', fgColor='FFA9F5A9')  # excluded marks
+_FILL_PALE_GREEN  = PatternFill(fill_type='solid', fgColor='FFA9F5A9')  # marks excluded by mitigating circumstances ('X' code)
 _FILL_PALE_YELLOW = PatternFill(fill_type='solid', fgColor='FFFFF066')  # fails: Y1/Y2 in 30-39 zone, and all Y3/Y4 fails
 _FILL_PALE_PINK   = PatternFill(fill_type='solid', fgColor='FFFFB3C6')  # Y1/Y2 fails below MIN_MARK (30%)
 _FILL_BEIGE       = PatternFill(fill_type='solid', fgColor='FFFFD699')  # borderline yearmark / overall (light orange-tan)
+
+# Outcome labels for students who are not assessed this cycle (already completed,
+# left, intercalating, or set by hand).  Their mark cells get no status highlight
+# (no green/yellow/pink/beige), and their output codes drop the R1/R2 markers.
+_SPECIAL_OUTCOME_LABELS = frozenset({
+    'Completed', 'Interrupt', 'Manual', 'Withdrawn', 'Intercal',
+})
+
+
+def _is_special_outcome(label):
+    """True if *label* is a non-assessed outcome (completed/left/intercalating/
+    manual), ignoring any ' (CertHE)' exit-award suffix (e.g. 'Withdrawn (CertHE)'
+    counts as special, while 'FAIL (CertHE)' does not)."""
+    if not label:
+        return False
+    return str(label).replace(' (CertHE)', '') in _SPECIAL_OUTCOME_LABELS
+
+
 _ALIGN_CTR   = Alignment(horizontal='center')
 _ALIGN_RIGHT = Alignment(horizontal='right')
 _INFO_ROW_H  = 17.0   # height of student info rows
@@ -2149,9 +2260,16 @@ def write_students(students, outpath, classyear):
             _c(info_row, col + 1, None)
             pending_merges.append((info_row, col, col + 1))
 
+        # Students who are not assessed this cycle (completed/left/intercalating/
+        # manual) get no status highlighting on any cell.
+        outcome_label = s.deg_class_alg if classyear in FINAL_CLASSYEARS else s.status
+        suppress_fill = _is_special_outcome(outcome_label)
+
         # Borderline (graduating, or progressing e.g. R/X) → beige on the relevant
         # mark cell: Overall for final years, Year Mark for progressing years.
-        is_borderline = s.borderline_for is not None or 'R/X' in str(s.status or '')
+        is_borderline = (not suppress_fill
+                         and (s.borderline_for is not None
+                              or 'R/X' in str(s.status or '')))
         beige_tname   = 'Overall' if classyear in FINAL_CLASSYEARS else 'Year Mark'
 
         # info row — trailing columns (computed attrs take priority; fall back to input value)
@@ -2174,8 +2292,11 @@ def write_students(students, outpath, classyear):
             _c(marks_row, i)
 
         # marks row — unit marks and output codes
-        # Fill priority: excluded → pale green; else a fail → pale pink (Y1/Y2 below
-        # MIN_MARK) or pale yellow (Y1/Y2 in the 30-39 zone, and all Y3/Y4 fails).
+        # Fill priority: excluded by mitigating circumstances (a standalone 'X'
+        # output code) → pale green.  A deferral ('R1'/'XL_R1') or carried mark
+        # ('LxC') is excluded too but left unfilled.  Else a fail → pale pink
+        # (Y1/Y2 below MIN_MARK) or pale yellow (Y1/Y2 in the 30-39 zone, and all
+        # Y3/Y4 fails).
         is_y12       = classyear in _DEFERRAL_CLASSYEARS   # Y1/Y2 classyears
         excluded_set = set(s.excluded_idx)
         failed_set   = set(s.failed_idx)
@@ -2183,8 +2304,13 @@ def write_students(students, outpath, classyear):
             col = u_start + 2 * i
             mark_cell = _c(marks_row, col, unit.mark)
             mark_num  = _numeric_mark(unit.mark)
-            if i in excluded_set:
-                mark_cell.fill = _FILL_PALE_GREEN
+            if suppress_fill:
+                pass  # not assessed this cycle: no status highlight
+            elif i in excluded_set:
+                # Green only for mitigating-circumstances exclusions; deferrals
+                # and carried marks are excluded but left unfilled.
+                if _is_mc_excluded(unit.output_code):
+                    mark_cell.fill = _FILL_PALE_GREEN
             elif i in failed_set or (mark_num is not None and mark_num <= PASS_MARK):
                 if is_y12 and mark_num is not None and mark_num < MIN_MARK:
                     mark_cell.fill = _FILL_PALE_PINK
@@ -2441,7 +2567,7 @@ def _stats_lines(students, cy):
     _PREFIX_ORDER = {'MPhys': 0, 'MMath': 0, 'MMath&Phys': 0, 'BSc': 1}
     _STATUS_ORDER = {
         'ACTV': 0, 'A/D': 1, 'REVW': 2, 'R/X': 3, 'REVW R/X': 4,
-        'REVW (BSc)': 5, 'FAIL': 99,
+        'REVW (BSc)': 5, 'FAIL (CertHE)': 98, 'FAIL': 99,
     }
 
     def _deg_key(cls):
@@ -2573,6 +2699,32 @@ def resolve_classyears(raw):
 # Main
 # ===========================================================================
 
+def apply_as_code_lists(students):
+    """Augment interrupt_list / withdrawn_list from each student's AS Code.
+
+    A student whose AS Code flags RFYR, RYOA or RYIA is added to interrupt_list
+    (status → 'Interrupt'); one whose AS Code is EXIT is added to
+    withdrawn_list (status → 'Withdrawn').  Emplids already on a list are not
+    duplicated.  The downstream apply_special_status() then applies the label.
+    Returns (n_interrupt_added, n_withdrawn_added).
+    """
+    seen_int = {_norm_eid(e) for e in interrupt_list}
+    seen_wdr = {_norm_eid(e) for e in withdrawn_list}
+    n_int = n_wdr = 0
+    for s in students:
+        eid  = _norm_eid(s.emplid)
+        code = str(s.AS_code).strip().upper() if s.AS_code is not None else ''
+        if (s.RFYR or s.RYOA or s.RYIA) and eid not in seen_int:
+            interrupt_list.append(s.emplid)
+            seen_int.add(eid)
+            n_int += 1
+        if 'EXIT' in code and eid not in seen_wdr:
+            withdrawn_list.append(s.emplid)
+            seen_wdr.add(eid)
+            n_wdr += 1
+    return n_int, n_wdr
+
+
 def _missing_marks_lines(students):
     """Return warning lines listing students with genuinely missing unit marks.
 
@@ -2585,7 +2737,7 @@ def _missing_marks_lines(students):
     special = {_norm_eid(e) for e in (interrupt_list + manual_list + withdrawn_list)}
     lines = []
     for s in students:
-        if _norm_eid(s.emplid) in special:
+        if s.COMP or _norm_eid(s.emplid) in special:
             continue
         missing = []
         for u in s.units:
@@ -2672,6 +2824,12 @@ def main():
         _out(f"  {_lbl('Input')}: {inpath}")
         _out(f"  {_lbl('Students')}: {len(students)} students, {n_units} units each")
 
+        # AS Code (Achievement Status): RFYR/RYOA → Interrupt, EXIT → Withdrawn.
+        n_int, n_wdr = apply_as_code_lists(students)
+        if n_int or n_wdr:
+            _out(f"  {_lbl('AS Code statuses')}: "
+                 f"{n_int} → Interrupt, {n_wdr} → Withdrawn")
+
         if args.fill_marks is not None:
             filled = sum(
                 1 for s in students for u in s.units if u.mark is None
@@ -2752,10 +2910,9 @@ def main():
 
         if args.sort_output:
             sort_attr = 'overall' if cy in FINAL_CLASSYEARS else 'yearmark'
-            _BOTTOM_LABELS = frozenset({'Manual', 'Interrupt', 'Intercal', 'Withdrawn'})
             def _sort_key(s):
                 label = s.deg_class_alg if cy in FINAL_CLASSYEARS else s.status
-                if label in _BOTTOM_LABELS:
+                if _is_special_outcome(label):
                     return (float('inf'), s.name or '')
                 try:
                     return (-float(getattr(s, sort_attr)), s.name or '')
