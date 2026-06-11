@@ -29,34 +29,84 @@ from openpyxl.utils import get_column_letter
 # ===========================================================================
 # Constants — update as required
 # ===========================================================================
-AY          = 2025                  # Academic year (2025 = AY 2024-25 etc.)
-if (AY == 2025):
-    INDIR       = "data2025_newcodes"   # Directory containing input exam grid spreadsheets
-elif (AY == 2026): 
-    INDIR = "data2026"
-OUTDIR      = "./"                  # Output directory for generated spreadsheets
+AY           = 2026   # default academic year (2025 = AY 2024-25 etc.); override on the command line with --AY
+OUTDIR       = "./"   # Output directory for generated spreadsheets
 SORT_OUTPUT  = False  # Sort output by mark (descending); overridden by --sort
-FILL_MARKS   = None  # Fill blank marks before processing: None = disabled, or a float e.g. 50.0; overridden by --fill_marks
+FILL_MARKS   = None   # Fill blank marks before processing: None = disabled, or a float e.g. 50.0; overridden by --fill_marks
 
-# Additional excel files to be read in
-Y3_CREDITS_FILE = "y4-comp-and-L4-2025.xlsx"  # supplementary Y3 credit data for Y4 students
-CF_FLAG_FILE = 'PHYS Carry forward.xlsx'  # carry-forward notes filename (set to None to disable)
-ABROAD_FILE = 'Study abroad 2023-24.xlsx'  # extra study-abroad emplids in its 1st column, merged into abroad_list (set filename; None to disable)
 
-# Special-status student lists.  Add emplids (int or str) to override normal
-# processing.  Matched students have their status (progressing years) or
-# Deg Class Alg/Actual (final years) set to the corresponding label, all
-# computed output codes cleared, and resits/fail reasons removed.
-interrupt_list = [10486912,11085845,11021684,11061389,11064835]   # interrupted studies  → 'Interrupt'
-manual_list    = []   # manual filling out/decision → 'Manual'
-withdrawn_list = [9819578,11307037,10895432]   # withdrawn students   → 'Withdrawn'
+def _configure_ay(ay):
+    """Set every academic-year-dependent global from *ay*.
 
-# Manual study-abroad override: 8-digit emplids of 4-year MPhys/MMath students
-# who spent a year abroad but whose plan string does NOT contain 'study' (so
-# they aren't auto-detected). Listed students are treated as study-abroad and
-# use _MPHYS_ABROAD_WEIGHTS for the Y4 (4/4m) overall mark.
-abroad_list = [10820251, 10826844, 10830728, 10849791, 10818157, 10821713, 10833591, 10834291, 10943429, 10669557, 10706596, 11487593, 11498024, 11498021, 11498023, 11184110]
-#abroad_list = []
+    Centralises all per-year configuration: the input directory, the
+    supplementary filenames, the special-status student lists, and the
+    classyear -> (input_file, output_file) map.  Called once at import with the
+    module default (AY), and again from main() when --AY overrides it.  Exits on
+    an unsupported year.
+
+    Special-status lists hold emplids (int or str) that override normal
+    processing: matched students have their status (progressing years) or Deg
+    Class Alg/Actual (final years) set to the label, computed output codes
+    cleared, and resits/fail reasons removed.  abroad_list holds 4-year
+    MPhys/MMath students who spent a year abroad but whose plan string does not
+    contain 'study' (so they aren't auto-detected).
+    """
+    global AY, INDIR, Y3_CREDITS_FILE, CF_FLAG_FILE, ABROAD_FILE
+    global interrupt_list, manual_list, withdrawn_list, abroad_list
+    global CLASSYEAR_FILES, ALL_CLASSYEARS
+
+    if ay == 2025:
+        INDIR           = "data2025_newcodes"
+        Y3_CREDITS_FILE = "y4-comp-and-L4-2025.xlsx"   # supplementary Y3 credit data for Y4 students
+        CF_FLAG_FILE    = 'PHYS Carry forward.xlsx'    # carry-forward notes (None to disable)
+        ABROAD_FILE     = 'Study abroad 2023-24.xlsx'  # extra study-abroad emplids (None to disable)
+        interrupt_list  = [11085845, 11021684, 11061389, 11064835]   # -> 'Interrupt'
+        manual_list     = []                                         # -> 'Manual'
+        withdrawn_list  = [9819578, 11307037, 10895432]              # -> 'Withdrawn'
+        abroad_list     = [10820251, 10826844, 10830728, 10849791, 10818157,
+                           10821713, 10833591, 10834291, 10943429, 10669557,
+                           10706596, 11487593, 11498024, 11498021, 11498023, 11184110]
+        CLASSYEAR_FILES = {
+            '1':   ('PHYS_1241_S2_Y1_Exam_Grids.xlsx',         f'1styear_Physics.AY{ay}.xlsx'),
+            '1m':  ('PHYS_1241_S2_Y1_MP_Exam_Grids.xlsx',      f'1styear_MathsPhysics.AY{ay}.xlsx'),
+            '2':   ('PHYS_1241_S2_Y2_Exam_Grids.xlsx',         f'2ndyear_Physics.AY{ay}.xlsx'),
+            '2m':  ('PHYS_1241_S2_Y2_MP_Exam_Grids.xlsx',      f'2ndyear_MathsPhysics.AY{ay}.xlsx'),
+            '31':  ('PHYS_1241_S2_Y3_PROG_Exam_Grids.xlsx',    f'3rdyear_MPhys.AY{ay}.xlsx'),
+            '31m': ('PHYS_1241_S2_Y3_MP_PROG_Exam_Grids.xlsx', f'3rdyear_MMath.AY{ay}.xlsx'),
+            '32':  ('PHYS_1241_S2_Y3_GRAD_Exam_Grids.xlsx',    f'FinalYear_BSc_Physics.AY{ay}.xlsx'),
+            '32m': ('PHYS_1241_S2_Y3_MP_GRAD_Exam_Grids.xlsx', f'FinalYear_BSc_MathsPhysics.AY{ay}.xlsx'),
+            '4':   ('PHYS_1241_S2_Y4_Exam_Grids.xlsx',         f'FinalYear_MPhys.AY{ay}.xlsx'),
+            '4m':  ('PHYS_1241_S2_Y4_MP_Exam_Grids.xlsx',      f'FinalYear_MMath.AY{ay}.xlsx'),
+        }
+    elif ay == 2026:
+        INDIR           = "data2026"
+        Y3_CREDITS_FILE = "level4&comp-2026.xlsx"
+        CF_FLAG_FILE    = 'A6_A10.xlsx'
+        ABROAD_FILE     = '1251_PHYS_Study_Abroad.xlsx'
+        interrupt_list  = []
+        manual_list     = []
+        withdrawn_list  = []
+        abroad_list     = []
+        CLASSYEAR_FILES = {
+            '1':   ('Y1.xlsx',         f'1styear_Physics.AY{ay}.xlsx'),
+            '1m':  ('Y1_MP.xlsx',      f'1styear_MathsPhysics.AY{ay}.xlsx'),
+            '2':   ('Y2.xlsx',         f'2ndyear_Physics.AY{ay}.xlsx'),
+            '2m':  ('Y2_MP.xlsx',      f'2ndyear_MathsPhysics.AY{ay}.xlsx'),
+            '31':  ('Y3_Prog.xlsx',    f'3rdyear_MPhys.AY{ay}.xlsx'),
+            '31m': ('Y3MP_Prog.xlsx',  f'3rdyear_MMath.AY{ay}.xlsx'),
+            '32':  ('Y3_Grad.xlsx',    f'FinalYear_BSc_Physics.AY{ay}.xlsx'),
+            '32m': ('Y3MP_Grad.xlsx',  f'FinalYear_BSc_MathsPhysics.AY{ay}.xlsx'),
+            '4':   ('Y4.xlsx',         f'FinalYear_MPhys.AY{ay}.xlsx'),
+            '4m':  ('Y4MP.xlsx',       f'FinalYear_MMath.AY{ay}.xlsx'),
+        }
+    else:
+        sys.exit(f"Error: unsupported --AY {ay}; valid academic years: 2025, 2026")
+
+    AY = ay
+    ALL_CLASSYEARS = list(CLASSYEAR_FILES.keys())
+
+
+_configure_ay(AY)   # populate AY-dependent globals at import; main() re-runs it if --AY is given
 
 # Pass mark for any individual unit
 PASS_MARK = 39.95
@@ -148,6 +198,12 @@ MUST_PASS_PROJECT = BSC_PROJECT_MODULES | frozenset({'PHYS40181', 'PHYS40182'})
 # All units that must be passed if taken (lab in any year + project).
 MUST_PASS = MUST_PASS_LAB | MUST_PASS_PROJECT
 
+# Project / dissertation modules for OUTPUT ordering — the must-pass projects plus
+# the alternative project units that fill a project slot (PHIL40000 for Physics with
+# Philosophy, MATH40011/MATH40022 for MMath). Used by _order_units to place project
+# units after the lab in the output grid. (See calc_project_mark for the same codes.)
+PROJECT_MODULES = MUST_PASS_PROJECT | frozenset({'PHIL40000', 'MATH40011', 'MATH40022'})
+
 # Maths units that Y1 M+P students must pass — cannot be compensated
 MUST_PASS_MATHS = frozenset({'MATH11121', 'MATH11022'})
 
@@ -187,35 +243,8 @@ CORE_MATHS_PHYSICS = frozenset({
 #
 # Values: (input_filename, output_filename)
 
-if (AY == 2025):
-  CLASSYEAR_FILES = {
-    '1':   ('PHYS_1241_S2_Y1_Exam_Grids.xlsx',         f'1styear_Physics.AY{AY}.xlsx'),
-    '1m':  ('PHYS_1241_S2_Y1_MP_Exam_Grids.xlsx',      f'1styear_MathsPhysics.AY{AY}.xlsx'),
-    '2':   ('PHYS_1241_S2_Y2_Exam_Grids.xlsx',         f'2ndyear_Physics.AY{AY}.xlsx'),
-    '2m':  ('PHYS_1241_S2_Y2_MP_Exam_Grids.xlsx',      f'2ndyear_MathsPhysics.AY{AY}.xlsx'),
-    '31':  ('PHYS_1241_S2_Y3_PROG_Exam_Grids.xlsx',    f'3rdyear_MPhys.AY{AY}.xlsx'),
-    '31m': ('PHYS_1241_S2_Y3_MP_PROG_Exam_Grids.xlsx', f'3rdyear_MMath.AY{AY}.xlsx'),
-    '32':  ('PHYS_1241_S2_Y3_GRAD_Exam_Grids.xlsx',    f'FinalYear_BSc_Physics.AY{AY}.xlsx'),
-    '32m': ('PHYS_1241_S2_Y3_MP_GRAD_Exam_Grids.xlsx', f'FinalYear_BSc_MathsPhysics.AY{AY}.xlsx'),
-    '4':   ('PHYS_1241_S2_Y4_Exam_Grids.xlsx',         f'FinalYear_MPhys.AY{AY}.xlsx'),
-    '4m':  ('PHYS_1241_S2_Y4_MP_Exam_Grids.xlsx',      f'FinalYear_MMath.AY{AY}.xlsx'),
-}
-elif (AY == 2026):
-    CLASSYEAR_FILES = {
-        '1':   ('Y1.xlsx',         f'1styear_Physics.AY{AY}.xlsx'),
-        '1m':  ('Y1_MP.xlsx',      f'1styear_MathsPhysics.AY{AY}.xlsx'),
-        '2':   ('Y2.xlsx',         f'2ndyear_Physics.AY{AY}.xlsx'),
-        '2m':  ('Y2_MP.xlsx',      f'2ndyear_MathsPhysics.AY{AY}.xlsx'),
-        '31':  ('Y3_Prog.xlsx',    f'3rdyear_MPhys.AY{AY}.xlsx'),
-        '31m': ('Y3MP_Prog.xlsx', f'3rdyear_MMath.AY{AY}.xlsx'),
-        '32':  ('Y3_Grad.xlsx',    f'FinalYear_BSc_Physics.AY{AY}.xlsx'),
-        '32m': ('Y3MP_Grad.xlsx', f'FinalYear_BSc_MathsPhysics.AY{AY}.xlsx'),
-        '4':   ('Y4.xlsx',         f'FinalYear_MPhys.AY{AY}.xlsx'),
-        '4m':  ('Y4MP.xlsx',      f'FinalYear_MMath.AY{AY}.xlsx'),
-    }
-
-
-ALL_CLASSYEARS = list(CLASSYEAR_FILES.keys())
+# CLASSYEAR_FILES (classyear -> (input_file, output_file)) and ALL_CLASSYEARS are
+# populated per academic year by _configure_ay() near the top of this file.
 
 # Human-readable description for each classyear key (used in reports).
 _CY_DESC = {
@@ -414,18 +443,26 @@ def _is_mc_excluded(output_code):
 def _raw_input_codes(unit):
     """Display string of a unit's raw input codes (EN + mit_circs).
 
-    The 'R1' / 'R2' resit markers are dropped but every other code is kept, in
-    order.  Used for completed / withdrawn / interrupted / manual / intercalating
-    students, who are not reassessed and so carry no computed action codes.
+    The 'R1' / 'R2' resit markers are converted to '1st att.' / '2nd att.' and
+    placed after any other codes; every other code is kept, in order.  Used for
+    completed / withdrawn / interrupted / manual / intercalating students, who are
+    not reassessed and so carry no computed action codes.
     str.split() handles the stray non-breaking spaces seen in mit_circs values.
     """
-    tokens = [
-        tok
-        for field in (unit.en, unit.mit_circs) if field
-        for tok in str(field).split()
-        if tok.upper() not in ('R1', 'R2')
-    ]
-    return ' '.join(tokens) or None
+    other = []
+    att   = []   # 'R1'/'R2' → '1st att.'/'2nd att.', shown after any other codes
+    for field in (unit.en, unit.mit_circs):
+        if not field:
+            continue
+        for tok in str(field).split():
+            u = tok.upper()
+            if u == 'R1':
+                att.append('1st att.')
+            elif u == 'R2':
+                att.append('2nd att.')
+            else:
+                other.append(tok)
+    return ' '.join(other + att) or None
 
 
 def _mark_suffix(value):
@@ -437,6 +474,35 @@ def _mark_suffix(value):
         return ''
     m = _MARK_NUM_RE.match(str(value).strip())
     return m.group(2).upper() if m else ''
+
+
+def _mark_accepted(value):
+    """True if a unit mark counts as a pass.
+
+    A mark passes when its numeric value exceeds PASS_MARK, or when it carries a
+    'C' (compensated) or 'R' (passed resit) accept-suffix — the board has accepted
+    such a mark, so the unit counts as passed even below PASS_MARK.
+    """
+    num = _numeric_mark(value)
+    return (num is not None and num > PASS_MARK) or _mark_suffix(value) in ('C', 'R')
+
+
+def _order_units(units):
+    """Return *units* ordered for the output grid: the lab unit(s) first, then the
+    project / dissertation unit(s), then every other unit in its original input order.
+
+    Python's sort is stable, so units within each group keep their input-file order —
+    in particular 'the rest' are left exactly as they came in.  Matching is on the
+    bare course code (coursename), so empty/unparsed slots fall through to the rest.
+    """
+    def _group(u):
+        code = (u.coursename or u.module or '').strip()
+        if code in MUST_PASS_LAB:
+            return 0
+        if code in PROJECT_MODULES:
+            return 1
+        return 2
+    return sorted(units, key=_group)
 
 
 class UnitInfo:
@@ -491,7 +557,7 @@ class StudentInfo:
         'overall',
         'project_mark', 'project_creds',
         'deg_class_alg', 'deg_class_actual',
-        'borderline_for', 'deg_class_rev',
+        'borderline_for', 'deg_class_rev', 'deg_class_rev_detail',
         'y3creds_below40_not_excl', 'y3creds_below40_excl', 'y3creds_l4_passed',
         'y3creds_below40',
         'l3_l4_credits_failed', 'credits_passed_y3y4',
@@ -571,6 +637,7 @@ class StudentInfo:
         self.deg_class_actual    = None   # actual degree classification (board may override)
         self.borderline_for      = None   # class student is borderline for, e.g. '1', '2.1'
         self.deg_class_rev       = None   # promotion note: 'P(A)' or 'P(B)', else None
+        self.deg_class_rev_detail = None  # not shown: BSc 'CR' borderline breakdown, e.g. 'CR/marks'
         self.y3creds_below40_not_excl   = None   # Y4 only: Y3 credits failed, not excluded (from Y3 credits sheet)
         self.y3creds_below40_excl       = None   # Y4 only: Y3 credits failed with MCs, excluded
         self.y3creds_l4_passed          = None   # Y4 only: L4 credits passed in Y3
@@ -601,9 +668,10 @@ class StudentInfo:
                             code (the deferral itself only applies in years 1/2; in years
                             3/4 a combined code falls back to 'AA'). Both input codes are
                             copied to the output column (before the action code) for info.
-          credits_passed is determined purely by mark (> PASS_MARK), regardless of
-          exclusion codes.  Excluded units whose mark does not pass instead count
-          toward the progression check via credits_deferred.
+          credits_passed is determined by mark (> PASS_MARK) or an accepted-mark
+          suffix ('C' compensated / 'R' passed resit), regardless of exclusion
+          codes.  Excluded units whose mark does not pass instead count toward the
+          progression check via credits_deferred.
         """
         taken            = 0
         passed           = 0
@@ -640,8 +708,8 @@ class StudentInfo:
             has_ca        = 'CA' in mit_codes
             defer_code    = 'EA' if has_ea else ('CA' if has_ca else None)  # deferral code present (EA preferred)
             both_aa_defer = has_aa and defer_code is not None
-            num           = _numeric_mark(unit.mark)
-            course_passed = num is not None and num > PASS_MARK
+            # course_passed honours the 'C'/'R' accept-suffix (see _mark_accepted).
+            course_passed = _mark_accepted(unit.mark)
 
             if both_aa_defer:
                 eff_code = 'AA' if course_passed else defer_code
@@ -714,18 +782,22 @@ class StudentInfo:
             # info; action codes (X, R1, ...) generated by the rules above come after,
             # e.g. 'XN_X' not 'X_XN', 'AA_EA_R1' not 'R1_AA_EA'.
             input_codes = []
+            att_codes   = []   # input-EN 'R1'/'R2' → '1st att.'/'2nd att.', shown after any other codes
             for code in sorted(en_codes - used_en):
                 if code == 'R2':
-                    input_codes.append('2nd att.')
-                    # R suffix means already capped externally; otherwise cap at 30 in yearmark.
-                    if _mark_suffix(unit.mark) != 'R':
+                    # A 'C' (compensated) or 'R' (passed resit) suffix means the
+                    # 2nd-attempt mark has been accepted: it stands uncapped and the
+                    # '2nd att.' note is redundant, so omit it.  Otherwise label the
+                    # attempt and cap the mark at 30 in the year mark.
+                    if _mark_suffix(unit.mark) not in ('C', 'R'):
+                        att_codes.append('2nd att.')
                         unit.capped = True
                 elif code == 'R1':
-                    pass  # R1 = 1st-attempt resit; treat as normal, no output annotation
+                    att_codes.append('1st att.')   # 1st-attempt resit: treated normally, labelled for clarity
                 else:
                     input_codes.append(code)
             input_codes.extend(sorted(mit_codes - used_mit))   # mit codes not consumed by a rule
-            parts = input_codes + action_codes
+            parts = input_codes + att_codes + action_codes
             unit.output_code = '_'.join(parts) if parts else None
 
         self.credits_taken      = taken
@@ -865,8 +937,9 @@ class StudentInfo:
         Students who already have status 'FAIL' are left unchanged.  Students
         who fail any criterion are treated as BSc candidates: the equivalent
         BSc classification is computed and written to self.status and the
-        trailing 'Award' column.  Status is prefixed with 'REVW ' when the
-        student is in a borderline zone; the Award value is never prefixed.
+        trailing 'Award' column.  Status is suffixed with ' (CR)' (and the
+        Award left blank for board review) when the student is in a borderline
+        zone; otherwise Status and Award both hold the clean-cut BSc class.
 
         self.fail_reason records which criteria sent the student to BSc
         consideration (credits, average, overall, Phys/Maths averages, or a
@@ -943,7 +1016,7 @@ class StudentInfo:
             return
 
         if self.borderline_for is not None:
-            self.status = f'REVW {bsc_class}'
+            self.status = f'{bsc_class} (CR)'
             self.trailing['Award'] = None   # borderline: leave Award blank for board review
         else:
             self.status = bsc_class
@@ -959,7 +1032,8 @@ class StudentInfo:
         manual_list, or withdrawn_list:
           - Progressing years: sets self.status to the label.
           - Final years: sets deg_class_alg and deg_class_actual to the label.
-        In all cases clears resits, fail_reason, deg_class_rev, borderline_for,
+        In all cases clears resits, fail_reason, deg_class_rev (and its
+        deg_class_rev_detail breakdown), borderline_for,
         and replaces every unit's output_code with the raw EN + mit_circs values
         from the input (no computed action codes).  The credits and averages
         computed earlier (creds_passed_taken, yearmark, overall, ...) are kept.
@@ -985,11 +1059,13 @@ class StudentInfo:
             self.deg_class_alg    = label
             self.deg_class_actual = label
             self.deg_class_rev    = None
+            self.deg_class_rev_detail = None
             self.borderline_for   = None
         elif classyear in FINAL_CLASSYEARS:
             self.deg_class_alg    = label
             self.deg_class_actual = label
             self.deg_class_rev    = None
+            self.deg_class_rev_detail = None
             self.borderline_for   = None
         else:
             self.status = label
@@ -1007,6 +1083,12 @@ class StudentInfo:
 
         for unit in self.units:
             unit.output_code = _raw_input_codes(unit)
+
+        # Non-awarded student with no current-year marks: the year mark is the
+        # '-1' sentinel, so blank the overall too (don't show a prior-years
+        # synthesis for someone who isn't being classified this year).
+        if _mark_is_absent(self.yearmark):
+            self.overall = '-1'
 
         return True
 
@@ -1043,6 +1125,7 @@ class StudentInfo:
             self.deg_class_alg    = 'Intercal'
             self.deg_class_actual = 'Intercal'
             self.deg_class_rev    = None
+            self.deg_class_rev_detail = None
             self.borderline_for   = None
         else:
             self.status = 'Intercal'
@@ -1052,6 +1135,11 @@ class StudentInfo:
 
         for unit in self.units:
             unit.output_code = _raw_input_codes(unit)
+
+        # No current-year marks (year mark = '-1' sentinel): blank the overall too
+        # rather than display a prior-years synthesis for an intercalating student.
+        if _mark_is_absent(self.yearmark):
+            self.overall = '-1'
 
     def calc_level_credits(self):
         """Count passed credits at level 3 and level 4 (level 6 treated as level 4; level 5 excluded).
@@ -1127,6 +1215,12 @@ class StudentInfo:
         Missing years (None or the '-1' sentinel) are dropped and the remaining
         weights renormalised so their ratios are preserved.  Sets self.overall to
         '-1' if no valid year marks are available.
+
+        Note: a student whose *current* year has no marks (year mark = '-1') still
+        gets a prior-years overall here — that is deliberate, so an MPhys/MMath Y4
+        student with no Y4 result can be awarded a BSc on years 1–3.  The overall
+        is only blanked to '-1' for non-awarded students (Intercal / Interrupt /
+        Withdrawn etc.), done in detect_intercal / apply_special_status.
 
         M+P variants use the same weights as their non-M+P counterparts.
         Study abroad is flagged via is_study_abroad (auto-detected when the plan
@@ -1318,6 +1412,7 @@ class StudentInfo:
         else:
             return
         orig_prefix = prefix   # programme prefix before any revert-to-BSc (MPhys/MMath fail)
+        bsc_award_suffix = ''   # ' (NN.N%)' BSc Y1-Y3 mark appended to an MPhys/MMath->BSc revert
 
         try:
             overall = float(self.overall)
@@ -1333,8 +1428,7 @@ class StudentInfo:
                 (u.coursename or u.module or '')
                 for u in self.units
                 if (u.coursename or u.module or '') in MUST_PASS
-                and not (_numeric_mark(u.mark) is not None
-                         and _numeric_mark(u.mark) > PASS_MARK)
+                and not _mark_accepted(u.mark)
             }
             has_req = not must_pass_failed
             l3 = self.credits_l3 + self.credits_l4   # L3+ passed credits for classification
@@ -1396,6 +1490,8 @@ class StudentInfo:
                             self.deg_class_rev = 'P(B)'
                         else:
                             # Record why neither algorithm promoted the student.
+                            # The output column shows just 'CR' (same as MPhys/MMath);
+                            # the breakdown is kept on deg_class_rev_detail (not shown).
                             # 'CR' is always present (A's credit threshold not met).
                             # If B's credit threshold was met, also report B's other failures.
                             reasons = ['CR']
@@ -1404,7 +1500,8 @@ class StudentInfo:
                                     reasons.append('Proj.')
                                 if ym >= 0 and not (ym > overall):
                                     reasons.append('marks')
-                            self.deg_class_rev = '/'.join(reasons)
+                            self.deg_class_rev = 'CR'
+                            self.deg_class_rev_detail = '/'.join(reasons)
 
                             # --- promotion_x: informational, does not change degree class ---
                             # Targets ONE CLASS ABOVE the base (nominal) classification.
@@ -1460,6 +1557,14 @@ class StudentInfo:
                 self.credits_passed_y3y4 = credits
             project_ok = (self.project_mark is not None
                           and self.project_mark > PASS_MARK)
+            if not project_ok and self.project_mark is not None:
+                # Accept a project whose combined mark is below pass only because a
+                # contributing unit carries a 'C'/'R' accept-suffix (compensated /
+                # passed resit); every present project unit must be accepted.
+                proj_units = [u for u in self.units
+                              if (u.coursename or u.module or '') in PROJECT_MODULES
+                              and _numeric_mark(u.mark) is not None]
+                project_ok = bool(proj_units) and all(_mark_accepted(u.mark) for u in proj_units)
 
             # Base honours class from the overall mark boundary plus the credit and
             # project requirement.  Short on credits by up to 20 (and project passed)
@@ -1471,13 +1576,13 @@ class StudentInfo:
                         cls = '1'
                     elif credits >= MPHYS_CREDITS_SHORT:
                         cls = '2.1'   # short on credits → one below 1st
-                        self.deg_class_rev = f'Y3/Y4 creds ({credits})'
+                        self.fail_reason = f'< {MPHYS_CREDITS_FULL} Y3/Y4 creds passed ({credits})'
                 elif overall >= BOUNDARY_UPPER2:
                     if credits >= MPHYS_CREDITS_FULL:
                         cls = '2.1'
                     elif credits >= MPHYS_CREDITS_SHORT:
                         cls = '2.2'   # short on credits → one below 2.1
-                        self.deg_class_rev = f'Y3/Y4 creds ({credits})'
+                        self.fail_reason = f'< {MPHYS_CREDITS_FULL} Y3/Y4 creds passed ({credits})'
                 elif overall >= BOUNDARY_LOWER2:
                     if credits >= MPHYS_CREDITS_FULL:
                         cls = '2.2'
@@ -1523,8 +1628,14 @@ class StudentInfo:
                     break
 
             if cls is None:
-                # Revert to a BSc degree based on the first three years (Y1=10,
-                # Y2=30, Y3=60), awarded on the overall mark boundary only.
+                # Revert to a BSc, assessed as a 3-year BSc (classyear 32): the BSc mark
+                # is the BSc-weighted (Y1=10, Y2=30, Y3=60) average of the first three
+                # years, and the class comes from its overall-mark boundary.  The
+                # L3-credit and must-pass requirements are treated as met (the student
+                # passed Y3 to progress into Y4) and borderline promotion is not
+                # attempted (the Y4 grid carries no Y3 credit-at-boundary data).
+                # self.overall keeps the MPhys/MMath overall (incl. Y4); the BSc Y1-Y3
+                # mark is shown in parentheses after the award, e.g. 'BSc 2.2 (52.5%)'.
                 prefix = 'BSc'
                 bsc_candidates = [(10, self.phys1), (30, self.phys2), (60, self.phys3)]
                 bsc_valid = []
@@ -1540,6 +1651,7 @@ class StudentInfo:
                     bsc_overall = math.floor(sum(w * m for w, m in bsc_valid) / tw * 10 + 0.5) / 10
                 else:
                     bsc_overall = -1.0
+                bsc_award_suffix = f' ({bsc_overall:.1f}%)' if bsc_overall >= 0 else ''
                 if bsc_overall >= BOUNDARY_FIRST:
                     cls = '1'
                 elif bsc_overall >= BOUNDARY_UPPER2:
@@ -1566,7 +1678,7 @@ class StudentInfo:
                         )
                 self.fail_reason = ' / '.join(fail_reasons)
 
-        self.deg_class_actual = f'{prefix} {cls}'
+        self.deg_class_actual = f'{prefix} {cls}{bsc_award_suffix}'
         if base == '4' and prefix == 'BSc':
             # MPhys/MMath failed the honours criteria and reverted to a BSc on the
             # first three years.  The algorithmic column shows the original programme's
@@ -1965,6 +2077,10 @@ def read_students(filepath):
             )
             for unit_name, mc, mk, en, mit in unit_col_map
         ]
+        # Output ordering: lab first, then project/dissertation, then the rest in
+        # input order. Done here (before any per-unit index lists are built) so the
+        # whole pipeline and the output grid share one consistent unit order.
+        s.units = _order_units(s.units)
 
         s.trailing = {name: _cell(row, c) for c, name in trailing_cols}
 
@@ -1999,21 +2115,21 @@ TRAILING_COLS = {
             'Year Mark', 'Status', 'Fail reason', 'Resits', 'Notes',
             'Pre-Exam Board Minutes', 'Exam Board Minutes'],
     '31':  ['Creds Passed/Taken', 'L3/L4 creds passed', 'Phys 1', 'Phys 2',
-            'BZ', 'Year Mark', 'Overall', 'Status', 'Award', 'Fail reason', 'Notes',
+            'BZ', 'Year Mark', 'Overall', 'Status', 'Award', 'Award reason', 'Notes',
             'Pre-Exam Board Minutes', 'Exam Board Minutes'],
     '31m': ['Creds Passed/Taken', 'L3/L4 creds passed', 'Phys 1', 'Phys 2',
             'Phys Year Mark', 'Math Year Mark', 'BZ', 'Year Mark', 'Overall',
-            'Status', 'Award', 'Fail reason', 'Notes',
+            'Status', 'Award', 'Award reason', 'Notes',
             'Pre-Exam Board Minutes', 'Exam Board Minutes'],
     '32':  ['Creds Passed/Taken', 'L3/L4 creds passed', 'Phys 1', 'Phys 2',
             'BZ', 'Year Mark', 'Overall', 'Deg Class Alg', 'Deg Class Rev',
-            'Deg Class Actual', 'Fail reason', 'Award', 'Classification',
+            'Deg Class Actual', 'Award reason', 'Award', 'Classification',
             'Award Alg', 'Award Actual', 'Classification Alg',
             'Classification Actual', 'Award Change', 'Classification Change',
             'Notes', 'Pre-Exam Board Minutes', 'Exam Board Minutes'],
     '32m': ['Creds Passed/Taken', 'L3/L4 creds passed', 'Phys 1', 'Phys 2',
             'Phys Year Mark', 'Math Year Mark', 'BZ', 'Year Mark', 'Overall',
-            'Deg Class Alg', 'Deg Class Rev', 'Deg Class Actual', 'Fail reason',
+            'Deg Class Alg', 'Deg Class Rev', 'Deg Class Actual', 'Award reason',
             'Award', 'Classification', 'Award Alg', 'Award Actual',
             'Classification Alg', 'Classification Actual',
             'Award Change', 'Classification Change',
@@ -2021,14 +2137,14 @@ TRAILING_COLS = {
     '4':   ['Creds Passed/Taken', 'Y3 creds failed w/wo MCs',
             'L4 creds passed Y3+Y4', 'Phys 1', 'Phys 2', 'Phys 3',
             'BZ', 'Year Mark', 'Overall', 'Deg Class Alg', 'Deg Class Rev',
-            'Deg Class Actual', 'Fail reason', 'Award', 'Classification',
+            'Deg Class Actual', 'Award reason', 'Award', 'Classification',
             'Award Alg', 'Award Actual', 'Classification Alg',
             'Classification Actual', 'Award Change', 'Classification Change',
             'Notes', 'Pre-Exam Board Minutes', 'Exam Board Minutes'],
     '4m':  ['Creds Passed/Taken', 'Y3 creds failed w/wo MCs',
             'L4 creds passed Y3+Y4', 'Phys 1', 'Phys 2', 'Phys 3',
             'Phys Year Mark', 'Math Year Mark', 'BZ', 'Year Mark', 'Overall',
-            'Deg Class Alg', 'Deg Class Rev', 'Deg Class Actual', 'Fail reason',
+            'Deg Class Alg', 'Deg Class Rev', 'Deg Class Actual', 'Award reason',
             'Award', 'Classification', 'Award Alg', 'Award Actual',
             'Classification Alg', 'Classification Actual',
             'Award Change', 'Classification Change',
@@ -2050,6 +2166,7 @@ _COL_WIDTHS = {
     'Math Year Mark':           12.00,
     'Status':                   11.00,
     'Fail reason':              24.00,
+    'Award reason':             24.00,
     'Resits':                   50.00,
     'Notes':                    50.00,
     'Pre-Exam Board Minutes':   40.00,
@@ -2147,6 +2264,7 @@ _TRAILING_ATTR = {
     'Phys 3':                'phys3',
     'Status':                'status',
     'Fail reason':           'fail_reason',
+    'Award reason':          'fail_reason',   # final years + Y3 MPhys/MMath (31/31m): same value, award-oriented header
     'Resits':                'resits',
     'BZ':                    'bz',
     'L3/L4 creds passed':       'l3_l4_creds_passed',
@@ -2265,12 +2383,15 @@ def write_students(students, outpath, classyear):
         outcome_label = s.deg_class_alg if classyear in FINAL_CLASSYEARS else s.status
         suppress_fill = _is_special_outcome(outcome_label)
 
-        # Borderline (graduating, or progressing e.g. R/X) → beige on the relevant
-        # mark cell: Overall for final years, Year Mark for progressing years.
+        # Borderline (graduating, or progressing e.g. R/X) → beige on the mark cell
+        # that drives the borderline decision.  borderline_for is set from the overall
+        # mark (final years and Y3 MPhys/MMath BSc consideration, classyear 31/31m),
+        # so it fills the Overall column where one exists; the Y2 'R/X' progression
+        # band is yearmark-based and has no Overall column, so it fills Year Mark.
         is_borderline = (not suppress_fill
                          and (s.borderline_for is not None
                               or 'R/X' in str(s.status or '')))
-        beige_tname   = 'Overall' if classyear in FINAL_CLASSYEARS else 'Year Mark'
+        beige_tname   = 'Overall' if 'Overall' in trailer_names else 'Year Mark'
 
         # info row — trailing columns (computed attrs take priority; fall back to input value)
         for j, tname in enumerate(trailer_names):
@@ -2576,8 +2697,9 @@ def _stats_lines(students, cy):
         return (_PREFIX_ORDER.get(prefix, 2), _GRADE_ORDER.get(grade, 9))
 
     def _status_key(st):
-        if st.startswith('BSc') or st.startswith('REVW BSc'):
-            grade = st.rsplit(' ', 1)[-1]
+        if st.startswith('BSc'):
+            # Drop a trailing ' (CR)' borderline marker before reading the grade.
+            grade = st.removesuffix(' (CR)').rsplit(' ', 1)[-1]
             return (50, _GRADE_ORDER.get(grade, 9))
         return (_STATUS_ORDER.get(st, 40), 0)
 
@@ -2589,6 +2711,9 @@ def _stats_lines(students, cy):
         marks   = []
         for s in students:
             cls = s.deg_class_actual or '?'
+            # Group MPhys->BSc reverts by class, dropping the ' (NN.N%)' BSc Y1-Y3
+            # mark that the grid shows after the award (e.g. 'BSc 2.2 (52.7%)').
+            cls = re.sub(r' \(\d+(?:\.\d+)?%\)$', '', cls)
             counts[cls] = counts.get(cls, 0) + 1
             rev = s.deg_class_rev or ''
             if 'P(A)' in rev and '_X' not in rev:
@@ -2644,6 +2769,17 @@ def _stats_lines(students, cy):
 def parse_args():
     parser = argparse.ArgumentParser(
         description=f'PyAssess2026: Physics undergraduate assessment (AY{AY})'
+    )
+    parser.add_argument(
+        '--AY',
+        type=int,
+        default=None,
+        metavar='YEAR',
+        help=(
+            f"Academic year to process (e.g. 2025, 2026), overriding the module "
+            f"default (AY={AY}). Selects the matching input directory, file names "
+            f"and special-status lists."
+        )
     )
     parser.add_argument(
         '--classyear',
@@ -2754,6 +2890,8 @@ def _missing_marks_lines(students):
 
 def main():
     args = parse_args()
+    if args.AY is not None and args.AY != AY:
+        _configure_ay(args.AY)   # override the module default; re-derives INDIR, file maps, lists
     classyears = resolve_classyears(args.classyear)
 
     multi  = len(classyears) > 1
@@ -2873,13 +3011,17 @@ def main():
                         s.y3creds_l4_passed        = data.get('y3creds_l4_passed') or 0
                         s.y3creds_below40          = s.y3creds_below40_not_excl + s.y3creds_below40_excl
 
-                # L3+ credits failed in the current Y4 grid (non-excluded units with mark <= PASS_MARK).
+                # L3+ credits NOT yet passed in the current Y4 grid: any unit whose
+                # mark is not accepted (a 'C'/'R' suffix counts as passed, see
+                # _mark_accepted) — including units still awaiting a mark, which are
+                # not yet earned and so must not be counted toward the credit total.
+                # MC-excluded fails ARE counted, matching the Y3 side (y3creds_below40
+                # sums both excluded and non-excluded Y3 fails): a unit not actually
+                # passed counts against the Y3+Y4 credit total regardless of MCs.
                 grid_failed = sum(
                     u.credits for u in s.units
                     if u.credits is not None
-                    and _numeric_mark(u.mark) is not None
-                    and not (_numeric_mark(u.mark) > PASS_MARK)
-                    and not u.excluded
+                    and not _mark_accepted(u.mark)
                     and _course_level(u.coursename or u.module or '') in (3, 4, 5, 6)
                 )
                 s.l3_l4_credits_failed = s.y3creds_below40 + grid_failed
