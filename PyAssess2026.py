@@ -65,7 +65,7 @@ def _configure_ay(ay):
         withdrawn_list  = [9819578, 11307037, 10895432]              # -> 'Withdrawn'
         abroad_list     = [10820251, 10826844, 10830728, 10849791, 10818157,
                            10821713, 10833591, 10834291, 10943429, 10669557,
-                           10706596, 11487593, 11498024, 11498021, 11498023, 11184110]
+                           10706596, 11487593, 11498024, 11498021, 11498023]
         CLASSYEAR_FILES = {
             '1':   ('PHYS_1241_S2_Y1_Exam_Grids.xlsx',         f'1styear_Physics.AY{ay}.xlsx'),
             '1m':  ('PHYS_1241_S2_Y1_MP_Exam_Grids.xlsx',      f'1styear_MathsPhysics.AY{ay}.xlsx'),
@@ -2414,13 +2414,15 @@ def write_students(students, outpath, classyear):
 
         # marks row — unit marks and output codes
         # Fill priority: excluded by mitigating circumstances (a standalone 'X'
-        # output code) → pale green.  A deferral ('R1'/'XL_R1') or carried mark
-        # ('LxC') is excluded too but left unfilled.  Else a fail → pale pink
-        # (Y1/Y2 below MIN_MARK) or pale yellow (Y1/Y2 in the 30-39 zone, and all
-        # Y3/Y4 fails).
+        # output code) → pale green.  A carried mark ('LxC') is excluded too but
+        # left unfilled.  A deferral ('R1'/'XL_R1') is excluded for processing
+        # but its cell is coloured by its mark like any fail.  Else a fail →
+        # pale pink (Y1/Y2 below MIN_MARK) or pale yellow (Y1/Y2 in the 30-39
+        # zone, and all Y3/Y4 fails).
         is_y12       = classyear in _DEFERRAL_CLASSYEARS   # Y1/Y2 classyears
         excluded_set = set(s.excluded_idx)
         failed_set   = set(s.failed_idx)
+        deferred_set = set(s.deferred_idx)
         for i, unit in enumerate(s.units):
             col = u_start + 2 * i
             mark_cell = _c(marks_row, col, unit.mark)
@@ -2428,10 +2430,20 @@ def write_students(students, outpath, classyear):
             if suppress_fill:
                 pass  # not assessed this cycle: no status highlight
             elif i in excluded_set:
-                # Green only for mitigating-circumstances exclusions; deferrals
-                # and carried marks are excluded but left unfilled.
+                # Green only for mitigating-circumstances exclusions; carried
+                # marks are excluded but left unfilled.  Deferrals are also held
+                # in excluded_idx for processing, but their cells should still
+                # show the fail colouring of the underlying mark (pink/yellow),
+                # the same as a non-deferred fail — purely an output choice; the
+                # deferral processing is unchanged.
                 if _is_mc_excluded(unit.output_code):
                     mark_cell.fill = _FILL_PALE_GREEN
+                elif (i in deferred_set and mark_num is not None
+                      and mark_num <= PASS_MARK):
+                    if is_y12 and mark_num < MIN_MARK:
+                        mark_cell.fill = _FILL_PALE_PINK
+                    else:
+                        mark_cell.fill = _FILL_PALE_YELLOW
             elif i in failed_set or (mark_num is not None and mark_num <= PASS_MARK):
                 if is_y12 and mark_num is not None and mark_num < MIN_MARK:
                     mark_cell.fill = _FILL_PALE_PINK
