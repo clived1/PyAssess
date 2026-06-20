@@ -559,6 +559,7 @@ class StudentInfo:
         'deg_class_alg', 'deg_class_actual',
         'borderline_for', 'deg_class_rev', 'deg_class_rev_detail',
         'y3creds_below40_not_excl', 'y3creds_below40_excl', 'y3creds_l4_passed',
+        'y3creds_l4_taken',
         'y3creds_below40',
         'l3_l4_credits_failed', 'credits_passed_y3y4',
         'y3_creds_failed_str', 'l4_creds_y3y4_str',
@@ -641,6 +642,7 @@ class StudentInfo:
         self.y3creds_below40_not_excl   = None   # Y4 only: Y3 credits failed, not excluded (from Y3 credits sheet)
         self.y3creds_below40_excl       = None   # Y4 only: Y3 credits failed with MCs, excluded
         self.y3creds_l4_passed          = None   # Y4 only: L4 credits passed in Y3
+        self.y3creds_l4_taken           = None   # Y4 only: L4+ credits taken in Y3 (from Y3 credits sheet)
         self.y3creds_below40            = None   # Y4 only: total Y3 credits below 40 (not_excl + excl)
         self.l3_l4_credits_failed       = None   # Y4 only: y3creds_below40 + L3+ credits failed in current Y4 grid
         self.credits_passed_y3y4        = None   # Y4 only: any-level credits passed over Y3+Y4 = 240 - l3_l4_credits_failed; used for the award threshold
@@ -2505,10 +2507,12 @@ def read_y3_credits(filepath):
       y3creds_below40_not_excl : contains 'not' and 'excluded', NOT 'pass'
       y3creds_below40_excl     : contains 'excluded', NOT 'not' or 'pass'
       y3creds_l4_passed        : contains 'l4' and 'pass'
+      y3creds_l4_taken         : contains 'l4' and 'taken'
 
     Returns a dict  {emplid_str: {'y3creds_below40_not_excl': int|None,
                                   'y3creds_below40_excl':     int|None,
-                                  'y3creds_l4_passed':        int|None}}
+                                  'y3creds_l4_passed':        int|None,
+                                  'y3creds_l4_taken':         int|None}}
     or an empty dict if the file is missing or unreadable.
     """
     try:
@@ -2557,6 +2561,11 @@ def read_y3_credits(filepath):
         lambda h: 'l4' in h.lower() and 'pass' in h.lower(),
         'L4 passed in Y3',
     )
+    col_l4_taken = _y3cr_find_col(
+        headers,
+        lambda h: 'l4' in h.lower() and 'taken' in h.lower(),
+        'L4 taken in Y3',
+    )
 
     def _int_val(row, col):
         if col is None:
@@ -2585,6 +2594,7 @@ def read_y3_credits(filepath):
             'y3creds_below40_not_excl': _int_val(row, col_not_excl),
             'y3creds_below40_excl':     _int_val(row, col_excl),
             'y3creds_l4_passed':        _int_val(row, col_l4),
+            'y3creds_l4_taken':         _int_val(row, col_l4_taken),
         }
 
     return result
@@ -3014,6 +3024,7 @@ def main():
                 s.y3creds_below40_not_excl = 0
                 s.y3creds_below40_excl     = 0
                 s.y3creds_l4_passed        = 0
+                s.y3creds_l4_taken         = 0
                 s.y3creds_below40          = 0
                 if y3_credits:
                     data = y3_credits.get(_norm_eid(s.emplid))
@@ -3021,6 +3032,7 @@ def main():
                         s.y3creds_below40_not_excl = data.get('y3creds_below40_not_excl') or 0
                         s.y3creds_below40_excl     = data.get('y3creds_below40_excl') or 0
                         s.y3creds_l4_passed        = data.get('y3creds_l4_passed') or 0
+                        s.y3creds_l4_taken         = data.get('y3creds_l4_taken') or 0
                         s.y3creds_below40          = s.y3creds_below40_not_excl + s.y3creds_below40_excl
 
                 # L3+ credits NOT yet passed in the current Y4 grid: any unit whose
