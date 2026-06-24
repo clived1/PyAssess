@@ -2294,7 +2294,7 @@ _TRAILING_FORMAT = {
 # Excel writing
 # ===========================================================================
 
-def write_students(students, outpath, classyear):
+def write_students(students, outpath, classyear, hide_id_cols=True):
     """Write *students* to *outpath* in 2-row-per-student format.
 
     Row 1    : bold header — fixed labels, 'Unit N' merged over each pair, trailing labels
@@ -2369,9 +2369,12 @@ def write_students(students, outpath, classyear):
                 cell.alignment = _ALIGN_CTR
             return cell
 
-        # info row — fixed columns
+        # info row — fixed columns (ID column bold + centered)
         for i, (_, attr) in enumerate(_FIXED_COLS, start=1):
-            _c(info_row, i, getattr(s, attr))
+            cell = _c(info_row, i, getattr(s, attr))
+            if i == 1:
+                cell.font = _FONT_BOLD
+                cell.alignment = _ALIGN_CTR
 
         # info row — unit module codes (merge pending)
         for i, unit in enumerate(s.units):
@@ -2478,6 +2481,19 @@ def write_students(students, outpath, classyear):
         ws.merge_cells(start_row=1, start_column=col, end_row=1, end_column=col + 1)
     for row, c1, c2 in pending_merges:
         ws.merge_cells(start_row=row, start_column=c1, end_row=row, end_column=c2)
+
+    # ---- freeze first 3 columns (ID, Emplid, Name) + header row ------
+    # freeze_panes pins everything above/left of the given cell; column 4,
+    # row 2 keeps columns A-C visible while scrolling right and the header
+    # row visible while scrolling down.
+    ws.freeze_panes = f'{get_column_letter(4)}2'
+
+    # ---- hide the 'Emplid' and 'Name' columns (unless --no_hidden) ---
+    if hide_id_cols:
+        for label in ('Emplid', 'Name'):
+            col = next(i for i, (lbl, _) in enumerate(_FIXED_COLS, start=1)
+                       if lbl == label)
+            ws.column_dimensions[get_column_letter(col)].hidden = True
 
     wb.save(outpath)
 
@@ -2836,6 +2852,15 @@ def parse_args():
             "overall for final-year students. Default: %(default)s."
         )
     )
+    parser.add_argument(
+        '--no_hidden',
+        action='store_true',
+        default=False,
+        help=(
+            "Show the 'Emplid' and 'Name' columns in the output. "
+            "By default these two columns are hidden."
+        )
+    )
     return parser.parse_args()
 
 
@@ -3086,7 +3111,7 @@ def main():
                     return (float('inf'), s.name or '')
             students.sort(key=_sort_key)
 
-        write_students(students, outpath, cy)
+        write_students(students, outpath, cy, hide_id_cols=not args.no_hidden)
         _out(f"  {_lbl('Output')}: {outpath}")
 
         for line in _stats_lines(students, cy):
