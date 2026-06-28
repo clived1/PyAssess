@@ -92,12 +92,12 @@ def _configure_ay(ay):
             '1m':  ('Y1_MP.xlsx',      f'1styear_MathsPhysics.AY{ay}.xlsx'),
             '2':   ('Y2.xlsx',         f'2ndyear_Physics.AY{ay}.xlsx'),
             '2m':  ('Y2_MP.xlsx',      f'2ndyear_MathsPhysics.AY{ay}.xlsx'),
-            '31':  ('Y3_Prog.xlsx',    f'3rdyear_MPhys.AY{ay}.xlsx'),
-            '31m': ('Y3MP_Prog.xlsx',  f'3rdyear_MMath.AY{ay}.xlsx'),
-            '32':  ('Y3_Grad.xlsx',    f'FinalYear_BSc_Physics.AY{ay}.xlsx'),
-            '32m': ('Y3MP_Grad.xlsx',  f'FinalYear_BSc_MathsPhysics.AY{ay}.xlsx'),
-            '4':   ('Y4.xlsx',         f'FinalYear_MPhys.AY{ay}.xlsx'),
-            '4m':  ('Y4MP.xlsx',       f'FinalYear_MMath.AY{ay}.xlsx'),
+            '31':  ('PHYS_1251_S2_Y3_PROG_EXAM_GRID.xlsx',    f'3rdyear_MPhys.AY{ay}.xlsx'),
+            '31m': ('PHYS_1251_S2_Y3_MP_PROG_EXAM_GRID.xlsx',  f'3rdyear_MMath.AY{ay}.xlsx'),
+            '32':  ('PHYS_1251_S2_Y3_GRAD_EXAM_GRID.xlsx',    f'FinalYear_BSc_Physics.AY{ay}.xlsx'),
+            '32m': ('PHYS_1251_S2_Y3_MP_GRAD_EXAM_GRID.xlsx',  f'FinalYear_BSc_MathsPhysics.AY{ay}.xlsx'),
+            '4':   ('PHYS_1251_S2_Y4_GRAD_EXAM_GRID.xlsx',         f'FinalYear_MPhys.AY{ay}.xlsx'),
+            '4m':  ('PHYS_1251_S2_Y4_MP_GRAD_EXAM_GRID.xlsx',       f'FinalYear_MMath.AY{ay}.xlsx'),
         }
     else:
         sys.exit(f"Error: unsupported --AY {ay}; valid academic years: 2025, 2026")
@@ -428,16 +428,18 @@ def _numeric_mark(value):
         return None
 
 def _is_mc_excluded(output_code):
-    """True if *output_code* carries a standalone 'X' token.
+    """True if *output_code* marks a mitigating-circumstances exclusion.
 
-    The 'X' action code marks a unit excluded by mitigating circumstances (an AA
-    in mit_circs).  A deferral ('R1', 'XL_R1', ...) or a carried mark ('L1C',
-    'L2C', 'L3C') is also excluded from the year mark but does NOT carry a lone
-    'X', so those marks are not highlighted green.  Splitting on '_' keeps 'XL_R1'
-    (a deferral) and 'XN' (missed exam) from matching, while 'XN_X', 'AA_EA_X'
-    etc. correctly do.
+    A unit excluded by mitigating circumstances (an AA in mit_circs) carries
+    either a standalone 'X' action code (e.g. 'XN_X', 'AA_EA_X') or, for the pure
+    missed-exam case (XN + AA only), the single code 'XL'.  A deferral ('R1',
+    'XL_R1', ...) or a carried mark ('L1C', 'L2C', 'L3C') is also excluded from
+    the year mark but does NOT represent an MC exclusion, so those marks are not
+    highlighted green.  Splitting on '_' keeps 'XL_R1' (a deferral) and 'XN'
+    (missed exam) from matching, while 'XN_X', 'AA_EA_X' and a lone 'XL' do.
     """
-    return 'X' in (output_code or '').split('_')
+    tokens = (output_code or '').split('_')
+    return 'X' in tokens or tokens == ['XL']
 
 
 def _raw_input_codes(unit):
@@ -748,7 +750,15 @@ class StudentInfo:
                 if not both_aa_defer:
                     used_mit.add('AA')         # lone AA: represented by 'X', not echoed
                 # (combined: leave AA and the deferral code unconsumed so both echo as input codes)
-                action_codes.append('X')
+                # Pure missed-exam exclusion — XN + AA and nothing else (no AB or
+                # other codes; only arises in years 3/4) — is shown as a single 'XL'
+                # code instead of 'XN_X'.  Display only: the XN echo is consumed and
+                # the 'X' action swapped for 'XL'; no exclusion/credit/outcome change.
+                if en_codes == frozenset({'XN'}) and mit_codes == frozenset({'AA'}):
+                    used_en.add('XN')
+                    action_codes.append('XL')
+                else:
+                    action_codes.append('X')
                 excluded += unit.credits
                 excluded_idx.append(idx);  excluded_courses.append(coursename)
 
