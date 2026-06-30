@@ -1384,7 +1384,11 @@ class StudentInfo:
         a borderline promotion that lifts a student into a higher class is still pulled
         back down if the awarded class lacks its credit requirement (e.g. promoted
         2.2 -> 2.1, then demoted 2.1 -> 2.2 on short L3 credits).
-          - deg_class_alg   : the stage-(1) mark-band class only (no promotion/demotion).
+          - deg_class_alg   : the STANDARD-rules award.  A standard P(A) promotion and
+                              the credit demotion are reflected (== deg_class_actual);
+                              a department promotion (P(B)/P(A_X)/P(B_X)) is NOT, so Alg
+                              then shows the pre-promotion class; a Y4 revert shows
+                              '<programme> Fail'.
           - deg_class_actual: the final award after stages (2) and (3).
           - deg_class_rev   : 'P(A)'/'P(B)' (promotion) and/or 'CR' (a credit demotion
                               or a considered-but-not-promoted borderline), de-duplicated.
@@ -1472,7 +1476,13 @@ class StudentInfo:
                 mark_cls = 'Fail'
 
             cls     = mark_cls
-            cls_alg = mark_cls   # 'Deg Class Alg' grade: no promotion, no demotion
+            # Pre-promotion class for the Alg column: mark-band with the STANDARD L3+
+            # credit demotion applied, but NO promotion.  Used only when a department
+            # promotion (B/A_X/B_X) lifts the actual award; a standard P(A) promotion
+            # keeps Alg == Actual.
+            cls_alg = mark_cls
+            if cls_alg in ('1', '2.1', '2.2') and BSC_L3_CREDITS_THIRD <= l3 < BSC_L3_CREDITS_UPPER:
+                cls_alg = {'1': '2.1', '2.1': '2.2', '2.2': '3'}[cls_alg]
 
             # --- (2) borderline detection and promotion (UNCHANGED criteria) ---
             # Each zone maps (target class, lower bound, upper bound, credits-at-boundary attr).
@@ -1620,7 +1630,18 @@ class StudentInfo:
             else:
                 mark_cls = None
             cls     = mark_cls
-            cls_alg = mark_cls if mark_cls is not None else 'Fail'
+            # Pre-promotion class for the Alg column: mark-band with the STANDARD credit
+            # demotion applied, but NO promotion.  Used only when a department promotion
+            # (B/A_X/B_X) lifts the actual award; a standard P(A) promotion keeps
+            # Alg == Actual.  A mark-band the standard rules cannot sustain on credits is
+            # a fail (a revert is handled separately as '<programme> Fail').
+            cls_alg = mark_cls
+            if cls_alg in ('1', '2.1', '2.2'):
+                if credits < MPHYS_CREDITS_SHORT:
+                    cls_alg = None
+                elif credits < MPHYS_CREDITS_FULL:
+                    cls_alg = {'1': '2.1', '2.1': '2.2', '2.2': None}[cls_alg]
+            cls_alg = cls_alg if cls_alg is not None else 'Fail'
 
             # --- (2) borderline promotion (UNCHANGED criteria): algorithm A, then B ---
             # A: >= Y4_PROMO_A_CREDITS credits (any level) at the target boundary mark;
@@ -1686,10 +1707,6 @@ class StudentInfo:
                 # self.overall keeps the MPhys/MMath overall (incl. Y4); the BSc Y1-Y3
                 # mark is shown in parentheses after the award, e.g. 'BSc 2.2 (52.5%)'.
                 prefix = 'BSc'
-                # A revert IS an MPhys/MMath fail (which is what triggers the BSc
-                # consideration), so the algorithmic column shows '<programme> Fail'
-                # regardless of the mark-band class that fell short on credits.
-                cls_alg = 'Fail'
                 bsc_candidates = [(10, self.phys1), (30, self.phys2), (60, self.phys3)]
                 bsc_valid = []
                 for weight, mark in bsc_candidates:
@@ -1740,13 +1757,21 @@ class StudentInfo:
             self.deg_class_rev = ' '.join(rev_tokens) or None
 
         # 'Deg Class Actual' = final award (after promotion + demotion / revert).
-        # 'Deg Class Alg' = the mark-band algorithmic award in the ORIGINAL programme,
-        # before any promotion or credit demotion: orig_prefix is the pre-revert
-        # programme, and cls_alg is the mark-band grade ('Fail' for an MPhys/MMath
-        # whose marks miss honours).  The promotion and any credit demotion are shown
-        # in 'Deg Class Rev'; the credit shortfall is in 'Award reason' (fail_reason).
+        # 'Deg Class Alg' = the award the STANDARD (algorithmic) rules give:
+        #   - a Y4 revert to BSc is an MPhys/MMath fail            -> '<programme> Fail'
+        #   - a department (non-standard) promotion B / A_X / B_X  -> the pre-promotion
+        #     class (cls_alg: mark-band with the standard credit demotion, no promotion)
+        #   - everything else (a standard P(A) promotion, or no class-changing
+        #     promotion, incl. a standard credit demotion)         -> same as Actual
+        # The promotion/credit notes are in 'Deg Class Rev'; the credit shortfall is in
+        # 'Award reason' (fail_reason).
         self.deg_class_actual = f'{prefix} {cls}{bsc_award_suffix}'
-        self.deg_class_alg = f'{orig_prefix} {cls_alg}'
+        if base == '4' and prefix == 'BSc':
+            self.deg_class_alg = f'{orig_prefix} Fail'
+        elif promo_note in ('P(B)', 'P(A_X)', 'P(B_X)'):
+            self.deg_class_alg = f'{orig_prefix} {cls_alg}'
+        else:
+            self.deg_class_alg = self.deg_class_actual
         # A Y3 BSc (incl. Maths+Physics) fail is awarded an exit DipHE provided
         # the student is NOT a direct entrant into Y2 (L2CM is a real mark, not
         # the -1 'no Year-2 mark' sentinel) and is registered for a standard load
