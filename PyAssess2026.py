@@ -1379,40 +1379,45 @@ class StudentInfo:
     def calc_deg_class(self, classyear):
         """Set deg_class_alg, deg_class_actual, borderline_for, and deg_class_rev.
 
-        For BSc (classyear 32/32m):
-          Upper classes (1/2.1/2.2): overall mark >= boundary AND >= BSC_L3_CREDITS_UPPER
-            passed L3 credits, including all MUST_PASS units (lab and project).
-          Short-credit rule: if L3 credits are in [BSC_L3_CREDITS_THIRD, BSC_L3_CREDITS_UPPER)
-            and MUST_PASS are satisfied, award one class below the mark-indicated class.
-          3rd class: overall >= BOUNDARY_THIRD AND >= BSC_L3_CREDITS_THIRD L3 credits
-            including MUST_PASS.
-          Ordinary 3rd ('BSc 3 ord'): >= BSC_L3_CREDITS_THIRD L3 credits but fails
-            proper-3rd criteria.
-          BSc Fail: otherwise.
+        Three stages in order: (1) a mark-band class, (2) borderline promotion, then
+        (3) a credit demotion applied to the *promoted* class.  This ordering matters:
+        a borderline promotion that lifts a student into a higher class is still pulled
+        back down if the awarded class lacks its credit requirement (e.g. promoted
+        2.2 -> 2.1, then demoted 2.1 -> 2.2 on short L3 credits).
+          - deg_class_alg   : the stage-(1) mark-band class only (no promotion/demotion).
+          - deg_class_actual: the final award after stages (2) and (3).
+          - deg_class_rev   : 'P(A)'/'P(B)' (promotion) and/or 'CR' (a credit demotion
+                              or a considered-but-not-promoted borderline), de-duplicated.
+          - fail_reason     : drives the 'Award reason' column; records the credit
+                              shortfall, e.g. '<80 credits (70)'.
 
-          Borderline zones (BSc only):
-            2% below each upper-class boundary (BSC_BORDERLINE_UPPER), 3% below the
-            3rd-class boundary (BSC_BORDERLINE_THIRD).  Borderline students are recorded
-            in self.borderline_for (e.g. '1', '2.1').
-            Algorithm A: if >= BSC_PROMO_A_CREDITS credits (any level) at the target
-              boundary mark, promote to the higher class; record 'P(A)' in deg_class_rev.
-            Algorithm B (tried only if A fails): if >= PROMO_B_CREDITS credits (any
-              level) at the target boundary mark, AND the BSc dissertation mark is at the target
-              level, AND yearmark > overall; promote and record 'P(B)'.
+        For BSc (classyear 32/32m):
+          (1) Mark-band class from the overall boundary, requiring the MUST_PASS units
+              (lab + project) and the BSC_L3_CREDITS_THIRD (60) L3+ floor:
+              1/2.1/2.2/3 by mark; '3 ord' if the floor/labs are met but the mark or
+              must-pass are not; 'Fail' below the L3+ floor.
+          (2) Borderline zones: 2% below each upper-class boundary (BSC_BORDERLINE_UPPER),
+              3% below the 3rd (BSC_BORDERLINE_THIRD); extended by _promo_boundary_extra.
+              Algorithm A: >= BSC_PROMO_A_CREDITS credits (ANY level) at the target
+                boundary mark -> promote, note 'P(A)'.
+              Algorithm B (only if A fails): >= PROMO_B_CREDITS such credits AND the BSc
+                dissertation at the target level AND yearmark > overall -> 'P(B)'.
+          (3) L3+ credit demotion: the awarded class must hold BSC_L3_CREDITS_UPPER (80)
+              L3+ credits; short by up to 20 (in [60, 80)) drops it ONE class
+              (1->2.1->2.2->3), without cascading.
 
         For MPhys (classyear 4) / MMath (classyear 4m):
-          Class from the overall mark boundary (1/2.1/2.2 — there is no 3rd class)
-          requiring >= MPHYS_CREDITS_FULL credits passed at any level over Y3+Y4
-          (credits_passed_y3y4) AND a passed project.
-          Short on credits by up to 20 (>= MPHYS_CREDITS_SHORT) with a passed project
-          drops the class one level.  Borderline promotion (within 2% below a
-          boundary) lifts a student one class via algorithm A (>= Y4_PROMO_A_CREDITS
-          Y4 credits, any level, at the target boundary mark) or, failing that,
-          algorithm B (>= PROMO_B_CREDITS such credits, project at the target level,
-          and yearmark > overall).  A student who fails the
-          2nd-class requirements (overall < 2.2 boundary and not promoted, or short
-          at 2.2, or project failed) reverts to a BSc degree based on years 1–3,
-          awarded on the overall mark boundary only.
+          (1) Mark-band class (1/2.1/2.2 — no 3rd) from the overall boundary, requiring a
+              passed project; None (-> revert to BSc) below the 2.2 boundary or no project.
+          (2) Borderline promotion as for BSc but with Y4_PROMO_A_CREDITS for algorithm A,
+              and the MPHYS_CREDITS_SHORT credit floor.
+          (3) Credit demotion: the awarded class needs MPHYS_CREDITS_FULL (200) credits
+              passed (any level) over Y3+Y4; short by up to 20 (>= MPHYS_CREDITS_SHORT)
+              drops one class, and a 2.2 (or anything below the short floor) reverts to a
+              BSc degree based on years 1–3 (overall-mark boundary only), shown with the
+              BSc Y1-Y3 mark in parentheses.  A revert is itself an MPhys/MMath fail, so
+              deg_class_alg shows '<programme> Fail'; a non-reverting MPhys/MMath keeps
+              its stage-(1) mark-band class.
         """
         base = classyear.rstrip('m')
         if base == '32':
@@ -1445,35 +1450,38 @@ class StudentInfo:
             has_req = not must_pass_failed
             l3 = self.credits_l3 + self.credits_l4   # L3+ passed credits for classification
 
-            if overall >= BOUNDARY_FIRST and l3 >= BSC_L3_CREDITS_UPPER and has_req:
-                cls = '1'
-            elif overall >= BOUNDARY_FIRST and l3 >= BSC_L3_CREDITS_THIRD and has_req:
-                cls = '2.1'   # short on L3 credits by up to 20 → one below 1st
-                self.deg_class_rev = f'L3/L4 creds ({l3})'
-            elif overall >= BOUNDARY_UPPER2 and l3 >= BSC_L3_CREDITS_UPPER and has_req:
-                cls = '2.1'
-            elif overall >= BOUNDARY_UPPER2 and l3 >= BSC_L3_CREDITS_THIRD and has_req:
-                cls = '2.2'   # short on L3 credits by up to 20 → one below 2.1
-                self.deg_class_rev = f'L3/L4 creds ({l3})'
-            elif overall >= BOUNDARY_LOWER2 and l3 >= BSC_L3_CREDITS_UPPER and has_req:
-                cls = '2.2'
-            elif overall >= BOUNDARY_THIRD and l3 >= BSC_L3_CREDITS_THIRD and has_req:
-                cls = '3'     # covers one-below-2.2 (short credits) and proper 3rd
-                if overall >= BOUNDARY_LOWER2:   # nominal 2.2 dropped to 3 on short L3 credits
-                    self.deg_class_rev = f'L3/L4 creds ({l3})'
+            # --- (1) mark-band class: the algorithmic award, BEFORE promotion or the
+            # L3-credit demotion — this is what 'Deg Class Alg' reports.  Honours
+            # (1/2.1/2.2/3) require the must-pass units and the 60-credit L3+ floor;
+            # the 80-credit requirement is applied later as a demotion (step 3), so it
+            # is NOT folded into the class here.
+            if has_req and l3 >= BSC_L3_CREDITS_THIRD:
+                if overall >= BOUNDARY_FIRST:
+                    mark_cls = '1'
+                elif overall >= BOUNDARY_UPPER2:
+                    mark_cls = '2.1'
+                elif overall >= BOUNDARY_LOWER2:
+                    mark_cls = '2.2'
+                elif overall >= BOUNDARY_THIRD:
+                    mark_cls = '3'
+                else:
+                    mark_cls = '3 ord'   # honours credits/labs met but < 40% overall
             elif l3 >= BSC_L3_CREDITS_THIRD:
-                cls = '3 ord'
+                mark_cls = '3 ord'       # must-pass failed but enough L3+ credits
             else:
-                cls = 'Fail'
+                mark_cls = 'Fail'
 
-            # --- borderline detection and promotion ---
+            cls     = mark_cls
+            cls_alg = mark_cls   # 'Deg Class Alg' grade: no promotion, no demotion
+
+            # --- (2) borderline detection and promotion (UNCHANGED criteria) ---
             # Each zone maps (target class, lower bound, upper bound, credits-at-boundary attr).
             # credits_at_* count all current-year credits (any level) at the boundary mark,
             # including excluded units (computed in calc_level_credits).
             # XB/BX in the BZ column (1.0) plus any 'AB -n%' unit code (n) extend
-            # every zone's lower bound (see _promo_boundary_extra).
-            cls_before_promo = cls   # base classification before any borderline promotion
-            cls_alg = cls_before_promo
+            # every zone's lower bound (see _promo_boundary_extra).  promo_note holds the
+            # review note ('P(A)'/'P(B)'/'CR'/'P(A_X)'/'P(B_X)') and is merged in step 4.
+            promo_note = None
             bz_extra = self._promo_boundary_extra()
             _BORDERLINE_ZONES = (
                 ('1',   BOUNDARY_FIRST  - BSC_BORDERLINE_UPPER, BOUNDARY_FIRST,  'credits_at_first'),
@@ -1488,7 +1496,7 @@ class StudentInfo:
 
                     if creds_at_target >= BSC_PROMO_A_CREDITS:
                         cls = target_cls
-                        self.deg_class_rev = 'P(A)'
+                        promo_note = 'P(A)'
                     else:
                         # Algorithm B: project at target level AND yearmark > overall
                         try:
@@ -1499,24 +1507,24 @@ class StudentInfo:
                                 and self.project_mark is not None and self.project_mark >= hi
                                 and ym > overall):
                             cls = target_cls
-                            self.deg_class_rev = 'P(B)'
+                            promo_note = 'P(B)'
                         else:
                             # Record why neither algorithm promoted the student.
-                            # The output column shows just 'CR' (same as MPhys/MMath);
-                            # the breakdown is kept on deg_class_rev_detail (not shown).
-                            # 'CR' is always present (A's credit threshold not met).
-                            # If B's credit threshold was met, also report B's other failures.
+                            # The output column shows just 'CR'; the breakdown is kept
+                            # on deg_class_rev_detail (not shown).  'CR' is always present
+                            # (A's credit threshold not met).  If B's credit threshold was
+                            # met, also report B's other failures.
                             reasons = ['CR']
                             if creds_at_target >= PROMO_B_CREDITS:
                                 if self.project_mark is None or self.project_mark < hi:
                                     reasons.append('Proj.')
                                 if ym >= 0 and not (ym > overall):
                                     reasons.append('marks')
-                            self.deg_class_rev = 'CR'
+                            promo_note = 'CR'
                             self.deg_class_rev_detail = '/'.join(reasons)
 
                             # --- promotion_x: informational, does not change degree class ---
-                            # Targets ONE CLASS ABOVE the base (nominal) classification.
+                            # Targets ONE CLASS ABOVE the mark-band classification.
                             # Same rule as algorithms A and B (A tried first, then B), but the
                             # credit bar is (2/3) of assessed credits (non-excluded, with a
                             # mark; any level): A_X uses that value (capped at 80), B_X uses it
@@ -1527,8 +1535,8 @@ class StudentInfo:
                                 '2.2':   ('2.1', 'credits_at_upper2', BOUNDARY_UPPER2),
                                 '2.1':   ('1',   'credits_at_first',  BOUNDARY_FIRST),
                             }
-                            if cls_before_promo in _X_ONE_ABOVE:
-                                x_cls, x_attr, x_hi = _X_ONE_ABOVE[cls_before_promo]
+                            if mark_cls in _X_ONE_ABOVE:
+                                x_cls, x_attr, x_hi = _X_ONE_ABOVE[mark_cls]
                                 creds_at_target_x = getattr(self, x_attr)
                                 assessed_creds = sum(
                                     u.credits for u in self.units
@@ -1538,13 +1546,33 @@ class StudentInfo:
                                 )
                                 two_thirds = assessed_creds * 2 / 3
                                 if creds_at_target_x >= min(two_thirds, BSC_PROMO_A_CREDITS):
-                                    self.deg_class_rev = 'P(A_X)'
+                                    promo_note = 'P(A_X)'
                                 elif (creds_at_target_x >= two_thirds - 10
                                         and self.project_mark is not None
                                         and self.project_mark >= x_hi
                                         and ym > overall):
-                                    self.deg_class_rev = 'P(B_X)'
+                                    promo_note = 'P(B_X)'
                     break
+
+            # --- (3) L3+ credit demotion on the (possibly promoted) class ---
+            # The awarded class must hold >= BSC_L3_CREDITS_UPPER (80) L3+ credits.
+            # Short by up to 20 (in [BSC_L3_CREDITS_THIRD, BSC_L3_CREDITS_UPPER)) drops
+            # it ONE class.  Applied AFTER promotion, so a borderline promotion can still
+            # be pulled back by a credit shortfall (e.g. promoted 2.2->2.1, then demoted
+            # 2.1->2.2).  Does not cascade.  The 'Award reason' column records the shortfall.
+            credit_demoted = False
+            if cls in ('1', '2.1', '2.2') and BSC_L3_CREDITS_THIRD <= l3 < BSC_L3_CREDITS_UPPER:
+                cls = {'1': '2.1', '2.1': '2.2', '2.2': '3'}[cls]
+                credit_demoted = True
+                self.fail_reason = f'<{BSC_L3_CREDITS_UPPER} credits ({l3})'
+
+            # --- (4) review note: promotion note + 'CR' credit flag, de-duplicated ---
+            rev_tokens = []
+            if promo_note and promo_note != 'CR':
+                rev_tokens.append(promo_note)
+            if credit_demoted or promo_note == 'CR':
+                rev_tokens.append('CR')
+            self.deg_class_rev = ' '.join(rev_tokens) or None
 
             # --- fail reason for BSc Fail ---
             if cls == 'Fail':
@@ -1578,39 +1606,31 @@ class StudentInfo:
                               and _numeric_mark(u.mark) is not None]
                 project_ok = bool(proj_units) and all(_mark_accepted(u.mark) for u in proj_units)
 
-            # Base honours class from the overall mark boundary plus the credit and
-            # project requirement.  Short on credits by up to 20 (and project passed)
-            # drops the class one level.  cls is None ⇒ no honours ⇒ revert to BSc.
-            cls = None
-            if project_ok:
-                if overall >= BOUNDARY_FIRST:
-                    if credits >= MPHYS_CREDITS_FULL:
-                        cls = '1'
-                    elif credits >= MPHYS_CREDITS_SHORT:
-                        cls = '2.1'   # short on credits → one below 1st
-                        self.fail_reason = f'< {MPHYS_CREDITS_FULL} Y3/Y4 creds passed ({credits})'
-                elif overall >= BOUNDARY_UPPER2:
-                    if credits >= MPHYS_CREDITS_FULL:
-                        cls = '2.1'
-                    elif credits >= MPHYS_CREDITS_SHORT:
-                        cls = '2.2'   # short on credits → one below 2.1
-                        self.fail_reason = f'< {MPHYS_CREDITS_FULL} Y3/Y4 creds passed ({credits})'
-                elif overall >= BOUNDARY_LOWER2:
-                    if credits >= MPHYS_CREDITS_FULL:
-                        cls = '2.2'
-                    # short at 2.2 → one below 2.2 → no 3rd class → revert to BSc
+            # --- (1) mark-band MPhys class: algorithmic award assuming full credits,
+            # BEFORE promotion or the credit demotion.  None ⇒ marks/project do not
+            # support an MPhys honours ⇒ revert to BSc.  Reported in 'Deg Class Alg'
+            # (shown as 'MPhys Fail' / 'MMath&Phys Fail' when None).  The credit
+            # requirement is applied later as a demotion (step 3), not folded in here.
+            if project_ok and overall >= BOUNDARY_FIRST:
+                mark_cls = '1'
+            elif project_ok and overall >= BOUNDARY_UPPER2:
+                mark_cls = '2.1'
+            elif project_ok and overall >= BOUNDARY_LOWER2:
+                mark_cls = '2.2'
+            else:
+                mark_cls = None
+            cls     = mark_cls
+            cls_alg = mark_cls if mark_cls is not None else 'Fail'
 
-            # ----- borderline promotion: algorithm A, then algorithm B -----
-            # A borderline student (overall within 2% below a class boundary) is
-            # promoted to that class by either:
-            #   A: >= Y4_PROMO_A_CREDITS credits (any level) at the target boundary mark;
-            #   B: >= PROMO_B_CREDITS such credits, AND the project at the target level,
-            #      AND yearmark > overall.
+            # --- (2) borderline promotion (UNCHANGED criteria): algorithm A, then B ---
+            # A: >= Y4_PROMO_A_CREDITS credits (any level) at the target boundary mark;
+            # B: >= PROMO_B_CREDITS such credits, AND the project at the target level,
+            #    AND yearmark > overall.
             # Both also require the MPHYS_CREDITS_SHORT credit floor (B's project-at-target
             # test implies the project is passed).  credits_at_* are from the Y4 grid only.
             # XB/BX in the BZ column (1.0) plus any 'AB -n%' unit code (n) widen
             # every band's lower bound (see _promo_boundary_extra).
-            cls_alg = cls  # pre-promotion class (None ⇒ would revert to BSc)
+            promo_note = None
             bz_extra = self._promo_boundary_extra()
             _MPHYS_ZONES = (
                 ('1',   BOUNDARY_FIRST  - BSC_BORDERLINE_UPPER, BOUNDARY_FIRST,  'credits_at_first'),
@@ -1628,16 +1648,33 @@ class StudentInfo:
                     if (project_ok and credits >= MPHYS_CREDITS_SHORT
                             and creds_at_target >= Y4_PROMO_A_CREDITS):
                         cls = target_cls
-                        self.deg_class_rev = 'P(A)'
+                        promo_note = 'P(A)'
                     elif (credits >= MPHYS_CREDITS_SHORT
                             and creds_at_target >= PROMO_B_CREDITS
                             and self.project_mark is not None and self.project_mark >= hi
                             and ym > overall):
                         cls = target_cls
-                        self.deg_class_rev = 'P(B)'
+                        promo_note = 'P(B)'
                     else:
-                        self.deg_class_rev = 'CR'
+                        promo_note = 'CR'
                     break
+
+            # --- (3) credit demotion on the (possibly promoted) class ---
+            # The awarded MPhys class needs >= MPHYS_CREDITS_FULL (200) credits over
+            # Y3+Y4.  Short by up to 20 (>= MPHYS_CREDITS_SHORT) drops it one class;
+            # a 2.2 has no lower honours, and anything below the short floor reverts
+            # to BSc (cls = None).  Applied AFTER promotion so a borderline promotion is
+            # still pulled back by a credit shortfall (matching the BSc rule above).
+            credit_demoted = False
+            if cls in ('1', '2.1', '2.2'):
+                if credits < MPHYS_CREDITS_SHORT:
+                    cls = None
+                    credit_demoted = True
+                elif credits < MPHYS_CREDITS_FULL:
+                    cls = {'1': '2.1', '2.1': '2.2', '2.2': None}[cls]
+                    credit_demoted = True
+                    if cls is not None:
+                        self.fail_reason = f'< {MPHYS_CREDITS_FULL} Y3/Y4 creds passed ({credits})'
 
             if cls is None:
                 # Revert to a BSc, assessed as a 3-year BSc (classyear 32): the BSc mark
@@ -1649,6 +1686,10 @@ class StudentInfo:
                 # self.overall keeps the MPhys/MMath overall (incl. Y4); the BSc Y1-Y3
                 # mark is shown in parentheses after the award, e.g. 'BSc 2.2 (52.5%)'.
                 prefix = 'BSc'
+                # A revert IS an MPhys/MMath fail (which is what triggers the BSc
+                # consideration), so the algorithmic column shows '<programme> Fail'
+                # regardless of the mark-band class that fell short on credits.
+                cls_alg = 'Fail'
                 bsc_candidates = [(10, self.phys1), (30, self.phys2), (60, self.phys3)]
                 bsc_valid = []
                 for weight, mark in bsc_candidates:
@@ -1690,20 +1731,22 @@ class StudentInfo:
                         )
                 self.fail_reason = ' / '.join(fail_reasons)
 
+            # --- review note: promotion note + 'CR' credit flag, de-duplicated ---
+            rev_tokens = []
+            if promo_note and promo_note != 'CR':
+                rev_tokens.append(promo_note)
+            if credit_demoted or promo_note == 'CR':
+                rev_tokens.append('CR')
+            self.deg_class_rev = ' '.join(rev_tokens) or None
+
+        # 'Deg Class Actual' = final award (after promotion + demotion / revert).
+        # 'Deg Class Alg' = the mark-band algorithmic award in the ORIGINAL programme,
+        # before any promotion or credit demotion: orig_prefix is the pre-revert
+        # programme, and cls_alg is the mark-band grade ('Fail' for an MPhys/MMath
+        # whose marks miss honours).  The promotion and any credit demotion are shown
+        # in 'Deg Class Rev'; the credit shortfall is in 'Award reason' (fail_reason).
         self.deg_class_actual = f'{prefix} {cls}{bsc_award_suffix}'
-        if base == '4' and prefix == 'BSc':
-            # MPhys/MMath failed the honours criteria and reverted to a BSc on the
-            # first three years.  The algorithmic column shows the original programme's
-            # fail; the actual column shows the awarded BSc class (e.g. 'BSc 2.2').
-            self.deg_class_alg = f'{orig_prefix} Fail'
-        elif self.deg_class_rev == 'P(B)':
-            # Algorithm B promotion: the algorithmic column keeps the nominal
-            # (pre-promotion) class; the actual column shows the promoted class.
-            self.deg_class_alg = f'{prefix} {cls_alg}'
-        else:
-            # No promotion, or Algorithm A promotion (which is itself algorithmic):
-            # both columns show the same (promoted, where applicable) class.
-            self.deg_class_alg = self.deg_class_actual
+        self.deg_class_alg = f'{orig_prefix} {cls_alg}'
         # A Y3 BSc (incl. Maths+Physics) fail is awarded an exit DipHE provided
         # the student is NOT a direct entrant into Y2 (L2CM is a real mark, not
         # the -1 'no Year-2 mark' sentinel) and is registered for a standard load
