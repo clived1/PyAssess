@@ -1136,14 +1136,21 @@ class StudentInfo:
         if classyear in FINAL_CLASSYEARS:
             self.deg_class_alg    = 'Intercal'
             self.deg_class_actual = 'Intercal'
-            self.deg_class_rev    = None
-            self.deg_class_rev_detail = None
-            self.borderline_for   = None
         else:
             self.status = 'Intercal'
 
-        self.resits      = None
-        self.fail_reason = ''
+        # An intercalating student has no award this cycle.  For Y3 MPhys/MMath
+        # (classyear 31/31m), calc_bsc_class_y3mphys runs before we know the
+        # student is intercalating and — when progression fails on the missing
+        # credits — may already have written a BSc class, or an exit DipHE, into
+        # the Award column and set a borderline flag.  The marks are not in, so
+        # there is no award: clear those so nothing leaks into the output.
+        self.trailing['Award']    = None
+        self.deg_class_rev        = None
+        self.deg_class_rev_detail = None
+        self.borderline_for       = None
+        self.resits               = None
+        self.fail_reason          = ''
 
         for unit in self.units:
             unit.output_code = _raw_input_codes(unit)
@@ -1584,8 +1591,13 @@ class StudentInfo:
                 rev_tokens.append('CR')
             self.deg_class_rev = ' '.join(rev_tokens) or None
 
-            # --- fail reason for BSc Fail ---
-            if cls == 'Fail':
+            # --- Award reason for a BSc Fail or ordinary ('ord') degree ---
+            # Both record the criteria the student missed: a sub-40% overall, the
+            # 60-credit L3+ floor, and any failed must-pass lab / project unit.  An
+            # ordinary degree is a below-honours pass (must-pass or 40% missed while
+            # clearing the credit floor), so the reason explains why it is only 'ord';
+            # the '< 60 creds' line only ever appears on a Fail (a '3 ord' clears it).
+            if cls in ('Fail', '3 ord'):
                 reasons = []
                 if overall < BOUNDARY_THIRD:
                     reasons.append('< 40% overall')
@@ -1593,8 +1605,14 @@ class StudentInfo:
                     reasons.append(f'< {BSC_L3_CREDITS_THIRD} L3 creds ({l3})')
                 if any(c in MUST_PASS_LAB for c in must_pass_failed):
                     reasons.append('Failed lab')
-                if any(c in MUST_PASS_PROJECT for c in must_pass_failed):
-                    reasons.append('Failed project')
+                # Name the failed project/dissertation code(s) — e.g.
+                # 'Failed project (PHYS30880)'.  Lists whichever code is present
+                # (PHYS30880 today; PHYS30881 or PHYS30882 in future, MATH30022 for
+                # Maths+Physics), so it tracks the module rename automatically.
+                failed_projects = sorted(c for c in must_pass_failed
+                                         if c in MUST_PASS_PROJECT)
+                if failed_projects:
+                    reasons.append(f"Failed project ({', '.join(failed_projects)})")
                 self.fail_reason = ' / '.join(reasons)
         else:
             # ----- MPhys (4) / MMath (4m) -----
@@ -1765,11 +1783,15 @@ class StudentInfo:
         #     promotion, incl. a standard credit demotion)         -> same as Actual
         # The promotion/credit notes are in 'Deg Class Rev'; the credit shortfall is in
         # 'Award reason' (fail_reason).
-        self.deg_class_actual = f'{prefix} {cls}{bsc_award_suffix}'
+        # '3 ord' is the internal ordinary-degree token; it is displayed as just
+        # 'ord' so a BSc ordinary degree reads 'BSc ord', not 'BSc 3 ord'.
+        cls_disp     = 'ord' if cls == '3 ord' else cls
+        cls_alg_disp = 'ord' if cls_alg == '3 ord' else cls_alg
+        self.deg_class_actual = f'{prefix} {cls_disp}{bsc_award_suffix}'
         if base == '4' and prefix == 'BSc':
             self.deg_class_alg = f'{orig_prefix} Fail'
         elif promo_note in ('P(B)', 'P(A_X)', 'P(B_X)'):
-            self.deg_class_alg = f'{orig_prefix} {cls_alg}'
+            self.deg_class_alg = f'{orig_prefix} {cls_alg_disp}'
         else:
             self.deg_class_alg = self.deg_class_actual
         # A Y3 BSc (incl. Maths+Physics) fail is awarded an exit DipHE provided
@@ -2800,7 +2822,7 @@ def _stats_lines(students, cy):
     if not n:
         return ['  (no students)']
 
-    _GRADE_ORDER  = {'1': 0, '2.1': 1, '2.2': 2, '3': 3, '3 ord': 4, 'Fail': 5}
+    _GRADE_ORDER  = {'1': 0, '2.1': 1, '2.2': 2, '3': 3, 'ord': 4, 'Fail': 5}
     _PREFIX_ORDER = {'MPhys': 0, 'MMath': 0, 'MMath&Phys': 0, 'BSc': 1}
     _STATUS_ORDER = {
         'ACTV': 0, 'A/D': 1, 'REVW': 2, 'R/X': 3, 'REVW R/X': 4,
