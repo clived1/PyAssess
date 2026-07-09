@@ -33,6 +33,8 @@ AY           = 2026   # default academic year (2025 = AY 2024-25 etc.); override
 OUTDIR       = "./"   # Output directory for generated spreadsheets
 SORT_OUTPUT  = False  # Sort output by mark (descending); overridden by --sort
 FILL_MARKS   = None   # Fill blank marks before processing: None = disabled, or a float e.g. 50.0; overridden by --fill_marks
+RESITS_ONE_COLUMN = False  # Y1/Y2 output: False = split resits into Referrals/Deferrals/Compensated columns;
+                           # True = single 'Resits' column (as before). Overridden by --resits_one_column.
 
 
 def _configure_ay(ay):
@@ -88,16 +90,16 @@ def _configure_ay(ay):
         withdrawn_list  = []
         abroad_list     = []
         CLASSYEAR_FILES = {
-            '1':   ('Y1.xlsx',         f'1styear_Physics.AY{ay}.xlsx'),
-            '1m':  ('Y1_MP.xlsx',      f'1styear_MathsPhysics.AY{ay}.xlsx'),
-            '2':   ('Y2.xlsx',         f'2ndyear_Physics.AY{ay}.xlsx'),
-            '2m':  ('Y2_MP.xlsx',      f'2ndyear_MathsPhysics.AY{ay}.xlsx'),
+            '1':   ('PHYS_1251_S2_Y1_EXAM_GRID.xlsx',         f'1styear_Physics.AY{ay}.xlsx'),
+            '1m':  ('PHYS_1251_S2_Y1_MP_EXAM_GRID.xlsx',      f'1styear_MathsPhysics.AY{ay}.xlsx'),
+            '2':   ('PHYS_1251_S2_Y2_EXAM_GRID.xlsx',         f'2ndyear_Physics.AY{ay}.xlsx'),
+            '2m':  ('PHYS_1251_S2_Y2_MP_EXAM_GRID.xlsx',      f'2ndyear_MathsPhysics.AY{ay}.xlsx'),
             '31':  ('PHYS_1251_S2_Y3_PROG_EXAM_GRID.xlsx',    f'3rdyear_MPhys.AY{ay}.xlsx'),
-            '31m': ('PHYS_1251_S2_Y3_MP_PROG_EXAM_GRID.xlsx',  f'3rdyear_MMath.AY{ay}.xlsx'),
+            '31m': ('PHYS_1251_S2_Y3_MP_PROG_EXAM_GRID.xlsx', f'3rdyear_MMath.AY{ay}.xlsx'),
             '32':  ('PHYS_1251_S2_Y3_GRAD_EXAM_GRID.xlsx',    f'FinalYear_BSc_Physics.AY{ay}.xlsx'),
-            '32m': ('PHYS_1251_S2_Y3_MP_GRAD_EXAM_GRID.xlsx',  f'FinalYear_BSc_MathsPhysics.AY{ay}.xlsx'),
-            '4':   ('PHYS_1251_S2_Y4_GRAD_EXAM_GRID.xlsx',         f'FinalYear_MPhys.AY{ay}.xlsx'),
-            '4m':  ('PHYS_1251_S2_Y4_MP_GRAD_EXAM_GRID.xlsx',       f'FinalYear_MMath.AY{ay}.xlsx'),
+            '32m': ('PHYS_1251_S2_Y3_MP_GRAD_EXAM_GRID.xlsx', f'FinalYear_BSc_MathsPhysics.AY{ay}.xlsx'),
+            '4':   ('PHYS_1251_S2_Y4_GRAD_EXAM_GRID.xlsx',    f'FinalYear_MPhys.AY{ay}.xlsx'),
+            '4m':  ('PHYS_1251_S2_Y4_MP_GRAD_EXAM_GRID.xlsx', f'FinalYear_MMath.AY{ay}.xlsx'),
         }
     else:
         sys.exit(f"Error: unsupported --AY {ay}; valid academic years: 2025, 2026")
@@ -548,7 +550,7 @@ class StudentInfo:
         'zone_idx', 'zone_courses',
         'compensated_idx', 'compensated_courses', 'credits_compensated',
         'referred_idx', 'referred_courses',
-        'resits',
+        'resits', 'referrals', 'deferrals', 'compensated',
         'fail', 'fail_reason',
         'status',
         'phys_yearmark', 'math_yearmark',
@@ -614,6 +616,9 @@ class StudentInfo:
         self.referred_idx        = []     # indices of units referred (R2 resit)
         self.referred_courses    = []     # coursenames of referred units
         self.resits              = None   # deferred/resit courses for output, e.g. 'PHYS10071[1] / PHYS10101[1]'
+        self.referrals           = None   # referred (R2) courses for the split output, e.g. 'PHYS10071 / PHYS10101'
+        self.deferrals           = None   # deferred (EA/CA) courses for the split output, no '[1]' suffix
+        self.compensated         = None   # compensated (C) courses for the split output
         self.fail                = False  # True if student cannot progress
         self.fail_reason         = ''     # short description of why student failed
         self.status              = None   # set once by calc_status(): 'ACTV', 'A/D', 'REVW', 'FAIL'
@@ -824,6 +829,15 @@ class StudentInfo:
         self.deferred_idx       = deferred_idx
         self.deferred_courses   = deferred_courses
         self.resits             = ' / '.join(f"{c}[1]" for c in deferred_courses if c) or None
+        self.deferrals          = ' / '.join(c for c in deferred_courses if c) or None
+
+    def _blank_resit_columns(self):
+        """Blank every resit-related output column — the single 'Resits' column
+        and the split 'Referrals'/'Deferrals'/'Compensated' columns — for a student
+        not being offered resits this cycle (fail, intercalating, or special status).
+        Keeps the split columns consistent with the single-column output.
+        """
+        self.resits = self.referrals = self.deferrals = self.compensated = None
 
     def calc_yearmark(self, classyear=None):
         """Set self.yearmark to the credit-weighted mean of all unit marks.
@@ -892,7 +906,7 @@ class StudentInfo:
             return
         if self.fail:
             self.status = 'FAIL'
-            self.resits = None
+            self._blank_resit_columns()
         elif self.referred_idx:
             self.status = 'REVW'
         elif self.deferred_idx:
@@ -1085,7 +1099,7 @@ class StudentInfo:
             if label == 'Withdrawn' and self.y2_certhe_eligible(classyear):
                 self.status = 'Withdrawn (CertHE)'
 
-        self.resits   = None
+        self._blank_resit_columns()
         if label == 'Withdrawn':
             notes_text = self.cf_flags or self.trailing.get('Notes') or ''
             self.fail_reason = ('' if 'withdrawn' in str(notes_text).lower()
@@ -1149,7 +1163,7 @@ class StudentInfo:
         self.deg_class_rev        = None
         self.deg_class_rev_detail = None
         self.borderline_for       = None
-        self.resits               = None
+        self._blank_resit_columns()
         self.fail_reason          = ''
 
         for unit in self.units:
@@ -2034,6 +2048,12 @@ class StudentInfo:
         self.referred_idx        = referred_idx
         self.referred_courses    = referred_courses
 
+        # Split-column values (Y1/Y2): referrals and compensated units, each without
+        # a suffix.  'deferrals' was set in exclude_units; the single 'Resits' column
+        # (referrals + deferred[1]) is rebuilt below when there are referrals.
+        self.referrals   = ' / '.join(c for c in referred_courses if c) or None
+        self.compensated = ' / '.join(c for c in compensated_courses if c) or None
+
         if referred_idx:
             if any((self.units[i].coursename or self.units[i].module) in MUST_PASS_LAB
                    for i in referred_idx):
@@ -2253,6 +2273,24 @@ TRAILING_COLS = {
             'Notes', 'Pre-Exam Board Minutes', 'Exam Board Minutes'],
 }
 
+# The single 'Resits' column (Y1/Y2 only) is split into these three columns unless
+# RESITS_ONE_COLUMN / --resits_one_column asks for the one-column form.
+_RESIT_SPLIT_COLS = ['Referrals', 'Deferrals', 'Compensated']
+
+
+def _trailer_names(classyear):
+    """Return the trailing-column headers for *classyear*, expanding the single
+    'Resits' column into Referrals/Deferrals/Compensated unless RESITS_ONE_COLUMN
+    is set.  Only Y1/Y2 carry a 'Resits' column, so other years are unaffected.
+    """
+    names = TRAILING_COLS[classyear]
+    if RESITS_ONE_COLUMN or 'Resits' not in names:
+        return names
+    out = []
+    for n in names:
+        out.extend(_RESIT_SPLIT_COLS if n == 'Resits' else [n])
+    return out
+
 # Column widths (Excel character units), measured from the "2 Line format" sheet.
 # '_unit' and '_code' are the two columns of each unit pair.
 _COL_WIDTHS = {
@@ -2269,10 +2307,13 @@ _COL_WIDTHS = {
     'Status':                   11.00,
     'Fail reason':              24.00,
     'Award reason':             24.00,
-    'Resits':                   50.00,
-    'Notes':                    50.00,
-    'Pre-Exam Board Minutes':   40.00,
-    'Exam Board Minutes':       40.00,
+    'Resits':                   55.00,
+    'Referrals':                41.00,
+    'Deferrals':                41.00,
+    'Compensated':              41.00,
+    'Notes':                    60.00,
+    'Pre-Exam Board Minutes':   45.00,
+    'Exam Board Minutes':       45.00,
     'Phys 1':                   7.00,
     'Phys 2':                   7.00,
     'Phys 3':                   7.00,
@@ -2368,6 +2409,9 @@ _TRAILING_ATTR = {
     'Fail reason':           'fail_reason',
     'Award reason':          'fail_reason',   # final years + Y3 MPhys/MMath (31/31m): same value, award-oriented header
     'Resits':                'resits',
+    'Referrals':             'referrals',
+    'Deferrals':             'deferrals',
+    'Compensated':           'compensated',
     'BZ':                    'bz',
     'L3/L4 creds passed':       'l3_l4_creds_passed',
     'L4 creds passed Y3+Y4':    'l4_creds_y3y4_str',
@@ -2409,7 +2453,7 @@ def write_students(students, outpath, classyear, hide_id_cols=True):
     Borders are applied to all cells before merging because openpyxl converts
     non-top-left merged cells to read-only MergedCell objects on merge_cells().
     """
-    trailer_names = TRAILING_COLS[classyear]
+    trailer_names = _trailer_names(classyear)
     n_units  = len(students[0].units) if students else 0
     n_fixed  = len(_FIXED_COLS)
     u_start  = n_fixed + 1               # 1-based col of first unit pair
@@ -2503,7 +2547,14 @@ def write_students(students, outpath, classyear, hide_id_cols=True):
             attr  = _TRAILING_ATTR.get(tname)
             value = getattr(s, attr) if attr else s.trailing.get(tname)
             if tname == 'Notes':
-                value = s.cf_flags or None
+                # Carry-forward notes plus any Notes text from the input grid,
+                # cf_flags first, dropping blanks and duplicates.
+                parts = []
+                for p in (s.cf_flags, s.trailing.get('Notes')):
+                    p = str(p).strip() if p is not None else ''
+                    if p and p not in parts:
+                        parts.append(p)
+                value = '; '.join(parts) or None
             cell  = _c(info_row, t_start + j, value)
             fmt   = _TRAILING_FORMAT.get(tname)
             if fmt:
@@ -2961,6 +3012,16 @@ def parse_args():
             "By default these two columns are hidden."
         )
     )
+    parser.add_argument(
+        '--resits_one_column',
+        action='store_true',
+        default=RESITS_ONE_COLUMN,
+        help=(
+            "Output a single 'Resits' column (as before) instead of splitting it "
+            "into separate 'Referrals', 'Deferrals' and 'Compensated' columns. "
+            "Only affects Y1/Y2. Default: %(default)s."
+        )
+    )
     return parser.parse_args()
 
 
@@ -3036,9 +3097,11 @@ def _missing_marks_lines(students):
 
 
 def main():
+    global RESITS_ONE_COLUMN
     args = parse_args()
     if args.AY is not None and args.AY != AY:
         _configure_ay(args.AY)   # override the module default; re-derives INDIR, file maps, lists
+    RESITS_ONE_COLUMN = args.resits_one_column   # CLI flag overrides the module default
     classyears = resolve_classyears(args.classyear)
 
     multi  = len(classyears) > 1
