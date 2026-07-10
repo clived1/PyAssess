@@ -124,7 +124,7 @@ BOUNDARY_THIRD  = 39.95
 
 # BSc L3 credit requirements for degree classification.
 # For 1st/2.1/2.2 the student must have passed >= BSC_L3_CREDITS_UPPER credits at
-# level 3 (mark > PASS_MARK), including all MUST_PASS units (lab and project).
+# level 3 (mark >= PASS_MARK), including all MUST_PASS units (lab and project).
 # For a proper 3rd they need >= BSC_L3_CREDITS_THIRD L3 credits including MUST_PASS units;
 # for an ordinary 3rd they need >= BSC_L3_CREDITS_THIRD without the MUST_PASS requirement.
 BSC_L3_CREDITS_UPPER = 80
@@ -182,7 +182,7 @@ MPHYS_REVIEW_MARK   = 52.95   # borderline band: >this but <=MPHYS_PROGRESS_MARK
 # Y3 MPhys/MMath → Y4 progression thresholds (classyear 31/31m)
 MPHYS_Y3_PROG_YEARMARK       = 49.95   # yearmark must exceed this to progress
 MPHYS_Y3_PROG_OVERALL        = 49.95   # overall mark must exceed this to progress
-MPHYS_Y3_PROG_CREDITS        = 100     # minimum credits passed (mark > PASS_MARK) to progress
+MPHYS_Y3_PROG_CREDITS        = 100     # minimum credits passed (mark >= PASS_MARK) to progress
 MPHYS_Y3_PROG_PHYS_MATH_MARK = 44.95  # MMath only: both phys and maths yearmarks must exceed this
 
 FINAL_CLASSYEARS = ['32', '32m', '4', '4m']   # graduating / final-year students
@@ -483,12 +483,12 @@ def _mark_suffix(value):
 def _mark_accepted(value):
     """True if a unit mark counts as a pass.
 
-    A mark passes when its numeric value exceeds PASS_MARK, or when it carries a
+    A mark passes when its numeric value meets or exceeds PASS_MARK, or when it carries a
     'C' (compensated) or 'R' (passed resit) accept-suffix — the board has accepted
     such a mark, so the unit counts as passed even below PASS_MARK.
     """
     num = _numeric_mark(value)
-    return (num is not None and num > PASS_MARK) or _mark_suffix(value) in ('C', 'R')
+    return (num is not None and num >= PASS_MARK) or _mark_suffix(value) in ('C', 'R')
 
 
 def _order_units(units):
@@ -597,7 +597,7 @@ class StudentInfo:
         self.trailing       = {}     # trailing columns: normalised name -> value
         self.yearmark           = None   # credit-weighted average of unit marks
         self.credits_taken      = None   # total credits with a mark
-        self.credits_passed     = None   # credits where mark > PASS_MARK
+        self.credits_passed     = None   # credits where mark >= PASS_MARK
         self.credits_excluded   = 0      # credits excluded from calculation (populated later)
         self.credits_deferred   = 0      # credits from deferred (EA) units (assumed passed)
         self.creds_passed_taken = None   # formatted string for output, e.g. '120 / 120'
@@ -608,7 +608,7 @@ class StudentInfo:
         self.deferred_idx       = []     # indices into self.units of deferred (EA) units
         self.deferred_courses   = []     # coursenames of deferred units
         self.some_unit_under_30  = False  # True if any failed unit is below MIN_MARK (30%)
-        self.zone_idx            = []     # indices of units in compensation zone (MIN_MARK < mark <= PASS_MARK)
+        self.zone_idx            = []     # indices of units in compensation zone (MIN_MARK < mark < PASS_MARK)
         self.zone_courses        = []     # coursenames of zone units
         self.compensated_idx     = []     # indices of units compensated (failed but allowed to count)
         self.compensated_courses = []     # coursenames of compensated units
@@ -677,7 +677,7 @@ class StudentInfo:
                             code (the deferral itself only applies in years 1/2; in years
                             3/4 a combined code falls back to 'AA'). Both input codes are
                             copied to the output column (before the action code) for info.
-          credits_passed is determined by mark (> PASS_MARK) or an accepted-mark
+          credits_passed is determined by mark (>= PASS_MARK) or an accepted-mark
           suffix ('C' compensated / 'R' passed resit), regardless of exclusion
           codes.  Excluded units whose mark does not pass instead count toward the
           progression check via credits_deferred.
@@ -828,8 +828,22 @@ class StudentInfo:
         self.failed_courses     = failed_courses
         self.deferred_idx       = deferred_idx
         self.deferred_courses   = deferred_courses
-        self.resits             = ' / '.join(f"{c}[1]" for c in deferred_courses if c) or None
-        self.deferrals          = ' / '.join(c for c in deferred_courses if c) or None
+        # A deferral offered as a first-attempt resit (R1) is optional when the
+        # student passes the unit anyway: its mark already meets PASS_MARK, or its
+        # 30-39% zone mark would have been compensated (see _deferral_optional /
+        # _compensatable_deferrals).  Optional deferrals are flagged '[1opt]' in the
+        # single column and '[opt]' in the split.
+        compensatable = self._compensatable_deferrals(classyear)
+        resit_parts = []
+        defer_parts = []
+        for i, c in zip(deferred_idx, deferred_courses):
+            if not c:
+                continue
+            opt = self._deferral_optional(i, compensatable)
+            resit_parts.append(f"{c}[1opt]" if opt else f"{c}[1]")
+            defer_parts.append(f"{c}[opt]" if opt else c)
+        self.resits             = ' / '.join(resit_parts) or None
+        self.deferrals          = ' / '.join(defer_parts) or None
 
     def _blank_resit_columns(self):
         """Blank every resit-related output column — the single 'Resits' column
@@ -838,6 +852,101 @@ class StudentInfo:
         Keeps the split columns consistent with the single-column output.
         """
         self.resits = self.referrals = self.deferrals = self.compensated = None
+
+    def _deferral_optional(self, idx, compensatable=frozenset()):
+        """True if the unit at *idx* is offered as a first-attempt resit ('R1' in
+        its output code, whether plain 'R1' or 'XL_R1') and the resit is optional
+        because the student passes the unit anyway — either
+
+          * its mark already meets PASS_MARK (a pass on marks), or
+          * its (30-39%) zone mark would have been compensated under the normal
+            rules — *compensatable* is the set of such deferred indices from
+            _compensatable_deferrals().
+
+        Optional deferrals are flagged '[1opt]' / '[opt]' in the resit columns.
+        """
+        unit = self.units[idx]
+        if 'R1' not in (unit.output_code or '').split('_'):
+            return False
+        num = _numeric_mark(unit.mark)
+        if num is not None and num >= PASS_MARK:
+            return True
+        return idx in compensatable
+
+    def _compensatable_deferrals(self, classyear):
+        """Return the set of deferred-unit indices whose (30-39%) zone mark would
+        have been compensated had it been treated as a normal failure.
+
+        Replays the standard Y1/Y2 compensation classification (see calc_referrals)
+        over the student's actual failed units *plus* the deferred units, so the
+        40-credit cap and the sub-30 referral path are applied to the combined
+        pool ('alongside real fails').  A deferred unit that comes out compensated
+        ('C') makes its resit optional.  Read-only — mutates nothing.
+
+        Must-pass units (labs, must-pass maths) are never compensated, a deferred
+        mark below the zone (< MIN_MARK) is never compensated, and already-excluded
+        mitigating-circumstances units are absent from the pool — so all of those
+        naturally keep their deferral mandatory.
+        """
+        if classyear not in _DEFERRAL_CLASSYEARS or not self.deferred_idx:
+            return set()
+
+        must_pass_for_cy = MUST_PASS_LAB | (MUST_PASS_MATHS if classyear == '1m' else frozenset())
+        core_for_cy      = CORE_PHYSICS | (CORE_MATHS_PHYSICS if classyear in ('1m', '2m')
+                                           else frozenset())
+
+        # Combined failed pool: actual failures + deferred units whose mark is a
+        # fail (< PASS_MARK).  A deferral at/above PASS_MARK already passes on marks
+        # (handled by the mark rule) and does not enter the pool.  Iterate in unit
+        # order, matching how calc_referrals consumes the 40-credit cap.
+        sim_idx = set(self.failed_idx)
+        for idx in self.deferred_idx:
+            num = _numeric_mark(self.units[idx].mark)
+            if num is not None and num < PASS_MARK:
+                sim_idx.add(idx)
+        sim_idx = sorted(sim_idx)
+
+        units = []
+        for idx in sim_idx:
+            unit       = self.units[idx]
+            coursename = unit.coursename or unit.module
+            units.append({
+                'idx':       idx,
+                'credits':   unit.credits or 0,
+                'mark':      _numeric_mark(unit.mark),
+                'must_pass': coursename in must_pass_for_cy,
+                'core':      coursename in core_for_cy,
+                'r2_en':     'R2' in _split_codes(unit.en),
+            })
+
+        failed_credits     = sum(u['credits'] for u in units)
+        some_unit_under_30 = any(u['mark'] is None or not (u['mark'] > MIN_MARK) for u in units)
+
+        compensated = set()
+        if failed_credits <= 40 and not some_unit_under_30:
+            # Full compensation: everything non-must-pass (and not a 2nd attempt) → C.
+            for u in units:
+                if not u['must_pass'] and not u['r2_en']:
+                    compensated.add(u['idx'])
+        elif some_unit_under_30:
+            # Referral path: zone non-core units → C while within the 40-credit cap.
+            used = 0
+            for u in units:
+                if u['mark'] is None or not (u['mark'] > MIN_MARK):
+                    continue                                  # under 30 → R2
+                if u['core'] or u['must_pass'] or u['r2_en']:
+                    continue                                  # → R2
+                if used + u['credits'] <= 40:
+                    compensated.add(u['idx'])
+                    used += u['credits']
+                # else over cap → R2
+        else:
+            # >40 credits, all in the zone: non-core (and not a 2nd attempt) → C, no cap.
+            for u in units:
+                if not u['core'] and not u['must_pass'] and not u['r2_en']:
+                    compensated.add(u['idx'])
+
+        return {idx for idx in self.deferred_idx if idx in compensated}
 
     def calc_yearmark(self, classyear=None):
         """Set self.yearmark to the credit-weighted mean of all unit marks.
@@ -1202,7 +1311,7 @@ class StudentInfo:
             eff = mark_num
             level = _course_level(unit.coursename or unit.module)
             if level == 3:
-                if eff > PASS_MARK:
+                if eff >= PASS_MARK:
                     l3 += unit.credits
                 if eff >= BOUNDARY_FIRST:
                     l3_first += unit.credits
@@ -1213,7 +1322,7 @@ class StudentInfo:
                 if eff >= BOUNDARY_THIRD:
                     l3_third += unit.credits
             elif level in (4, 6):
-                if eff > PASS_MARK:
+                if eff >= PASS_MARK:
                     l4 += unit.credits
             # Credits at each class boundary count ALL current-year units (any
             # level, incl. excluded) — used for borderline promotion (Alg A/B).
@@ -1638,7 +1747,7 @@ class StudentInfo:
                 credits = MPHYS_CREDITS_TOTAL - (self.l3_l4_credits_failed or 0)
                 self.credits_passed_y3y4 = credits
             project_ok = (self.project_mark is not None
-                          and self.project_mark > PASS_MARK)
+                          and self.project_mark >= PASS_MARK)
             if not project_ok and self.project_mark is not None:
                 # Accept a project whose combined mark is below pass only because a
                 # contributing unit carries a 'C'/'R' accept-suffix (compensated /
@@ -2058,7 +2167,11 @@ class StudentInfo:
             if any((self.units[i].coursename or self.units[i].module) in MUST_PASS_LAB
                    for i in referred_idx):
                 self.fail_reason = 'Resit failed lab'
-            resit_parts = [f"{c}[1]" for c in self.deferred_courses]
+            compensatable = self._compensatable_deferrals(classyear)
+            resit_parts = [
+                f"{c}[1opt]" if self._deferral_optional(i, compensatable) else f"{c}[1]"
+                for i, c in zip(self.deferred_idx, self.deferred_courses)
+            ]
             resit_parts += referred_courses
             self.resits = ' / '.join(p for p in resit_parts if p) or None
 
@@ -2595,12 +2708,12 @@ def write_students(students, outpath, classyear, hide_id_cols=True):
                 if _is_mc_excluded(unit.output_code):
                     mark_cell.fill = _FILL_PALE_GREEN
                 elif (i in deferred_set and mark_num is not None
-                      and mark_num <= PASS_MARK):
+                      and mark_num < PASS_MARK):
                     if is_y12 and mark_num < MIN_MARK:
                         mark_cell.fill = _FILL_PALE_PINK
                     else:
                         mark_cell.fill = _FILL_PALE_YELLOW
-            elif i in failed_set or (mark_num is not None and mark_num <= PASS_MARK):
+            elif i in failed_set or (mark_num is not None and mark_num < PASS_MARK):
                 if is_y12 and mark_num is not None and mark_num < MIN_MARK:
                     mark_cell.fill = _FILL_PALE_PINK
                 else:
