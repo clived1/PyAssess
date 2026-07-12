@@ -173,6 +173,7 @@ ABROAD_MODULES = frozenset({'PHYS31000', 'PHYS41000'})
 # Credit thresholds for Y1/Y2 progression
 MIN_CREDITS_TO_PROGRESS  = 80   # credits at >= PASS_MARK needed to progress without resits
 MIN_PASS_CREDITS         = 60   # credits at >= PASS_MARK needed at first attempt to avoid FAIL
+COMPENSATION_CAP         = 40   # max credits that may be compensated (Y1/Y2)
 
 # Y2 yearmark thresholds for MPhys/MMath progression
 MPHYS_PROGRESS_MARK = 54.95   # must exceed this to progress to MPhys/MMath Y3 (ACTV)
@@ -550,6 +551,7 @@ class StudentInfo:
         'zone_idx', 'zone_courses',
         'compensated_idx', 'compensated_courses', 'credits_compensated',
         'referred_idx', 'referred_courses',
+        'deferral_optional_idx', 'resit_note',
         'resits', 'referrals', 'deferrals', 'compensated',
         'fail', 'fail_reason',
         'status',
@@ -615,6 +617,8 @@ class StudentInfo:
         self.credits_compensated = 0      # total credits compensated
         self.referred_idx        = []     # indices of units referred (R2 resit)
         self.referred_courses    = []     # coursenames of referred units
+        self.deferral_optional_idx = set()  # deferred indices whose resit is optional ('[1opt]' / '[opt]')
+        self.resit_note          = None   # Notes-column instruction when the optional deferrals exceed COMPENSATION_CAP
         self.resits              = None   # deferred/resit courses for output, e.g. 'PHYS10071[1] / PHYS10101[1]'
         self.referrals           = None   # referred (R2) courses for the split output, e.g. 'PHYS10071 / PHYS10101'
         self.deferrals           = None   # deferred (EA/CA) courses for the split output, no '[1]' suffix
@@ -829,21 +833,27 @@ class StudentInfo:
         self.deferred_idx       = deferred_idx
         self.deferred_courses   = deferred_courses
         # A deferral offered as a first-attempt resit (R1) is optional when the
-        # student passes the unit anyway: its mark already meets PASS_MARK, or its
-        # 30-39% zone mark would have been compensated (see _deferral_optional /
-        # _compensatable_deferrals).  Optional deferrals are flagged '[1opt]' in the
-        # single column and '[opt]' in the split.
-        compensatable = self._compensatable_deferrals(classyear)
+        # student passes the unit anyway (see _analyse_deferrals).  Optional
+        # deferrals are flagged '[1opt]' in the single column and '[opt]' in the
+        # split; self.resit_note carries any 'resit >= n credits' instruction.
+        self.deferral_optional_idx, self.resit_note = self._analyse_deferrals(classyear)
+        self._build_deferral_columns()
+
+    def _build_deferral_columns(self):
+        """Set the 'Resits' and 'Deferrals' columns from self.deferred_idx, flagging
+        the members of self.deferral_optional_idx as optional.  Called once the
+        optional set is known, and again by calc_referrals when referrals are added.
+        """
         resit_parts = []
         defer_parts = []
-        for i, c in zip(deferred_idx, deferred_courses):
+        for i, c in zip(self.deferred_idx, self.deferred_courses):
             if not c:
                 continue
-            opt = self._deferral_optional(i, compensatable)
+            opt = i in self.deferral_optional_idx
             resit_parts.append(f"{c}[1opt]" if opt else f"{c}[1]")
             defer_parts.append(f"{c}[opt]" if opt else c)
-        self.resits             = ' / '.join(resit_parts) or None
-        self.deferrals          = ' / '.join(defer_parts) or None
+        self.resits    = ' / '.join(resit_parts) or None
+        self.deferrals = ' / '.join(defer_parts) or None
 
     def _blank_resit_columns(self):
         """Blank every resit-related output column — the single 'Resits' column
@@ -852,62 +862,19 @@ class StudentInfo:
         Keeps the split columns consistent with the single-column output.
         """
         self.resits = self.referrals = self.deferrals = self.compensated = None
+        self.resit_note = None
 
-    def _deferral_optional(self, idx, compensatable=frozenset()):
-        """True if the unit at *idx* is offered as a first-attempt resit ('R1' in
-        its output code, whether plain 'R1' or 'XL_R1') and the resit is optional
-        because the student passes the unit anyway — either
-
-          * its mark already meets PASS_MARK (a pass on marks), or
-          * its (30-39%) zone mark would have been compensated under the normal
-            rules — *compensatable* is the set of such deferred indices from
-            _compensatable_deferrals().
-
-        Optional deferrals are flagged '[1opt]' / '[opt]' in the resit columns.
+    def _replay_compensation(self, pool_idx, classyear):
+        """Replay the standard Y1/Y2 compensation classification (see calc_referrals)
+        over the unit indices in *pool_idx*, and return the subset that comes out
+        compensated ('C').  Read-only — mutates nothing.
         """
-        unit = self.units[idx]
-        if 'R1' not in (unit.output_code or '').split('_'):
-            return False
-        num = _numeric_mark(unit.mark)
-        if num is not None and num >= PASS_MARK:
-            return True
-        return idx in compensatable
-
-    def _compensatable_deferrals(self, classyear):
-        """Return the set of deferred-unit indices whose (30-39%) zone mark would
-        have been compensated had it been treated as a normal failure.
-
-        Replays the standard Y1/Y2 compensation classification (see calc_referrals)
-        over the student's actual failed units *plus* the deferred units, so the
-        40-credit cap and the sub-30 referral path are applied to the combined
-        pool ('alongside real fails').  A deferred unit that comes out compensated
-        ('C') makes its resit optional.  Read-only — mutates nothing.
-
-        Must-pass units (labs, must-pass maths) are never compensated, a deferred
-        mark below the zone (< MIN_MARK) is never compensated, and already-excluded
-        mitigating-circumstances units are absent from the pool — so all of those
-        naturally keep their deferral mandatory.
-        """
-        if classyear not in _DEFERRAL_CLASSYEARS or not self.deferred_idx:
-            return set()
-
         must_pass_for_cy = MUST_PASS_LAB | (MUST_PASS_MATHS if classyear == '1m' else frozenset())
         core_for_cy      = CORE_PHYSICS | (CORE_MATHS_PHYSICS if classyear in ('1m', '2m')
                                            else frozenset())
 
-        # Combined failed pool: actual failures + deferred units whose mark is a
-        # fail (< PASS_MARK).  A deferral at/above PASS_MARK already passes on marks
-        # (handled by the mark rule) and does not enter the pool.  Iterate in unit
-        # order, matching how calc_referrals consumes the 40-credit cap.
-        sim_idx = set(self.failed_idx)
-        for idx in self.deferred_idx:
-            num = _numeric_mark(self.units[idx].mark)
-            if num is not None and num < PASS_MARK:
-                sim_idx.add(idx)
-        sim_idx = sorted(sim_idx)
-
         units = []
-        for idx in sim_idx:
+        for idx in sorted(pool_idx):    # unit order, matching how calc_referrals consumes the cap
             unit       = self.units[idx]
             coursename = unit.coursename or unit.module
             units.append({
@@ -923,30 +890,97 @@ class StudentInfo:
         some_unit_under_30 = any(u['mark'] is None or not (u['mark'] > MIN_MARK) for u in units)
 
         compensated = set()
-        if failed_credits <= 40 and not some_unit_under_30:
+        if failed_credits <= COMPENSATION_CAP and not some_unit_under_30:
             # Full compensation: everything non-must-pass (and not a 2nd attempt) → C.
             for u in units:
                 if not u['must_pass'] and not u['r2_en']:
                     compensated.add(u['idx'])
         elif some_unit_under_30:
-            # Referral path: zone non-core units → C while within the 40-credit cap.
+            # Referral path: zone non-core units → C while within the credit cap.
             used = 0
             for u in units:
                 if u['mark'] is None or not (u['mark'] > MIN_MARK):
                     continue                                  # under 30 → R2
                 if u['core'] or u['must_pass'] or u['r2_en']:
                     continue                                  # → R2
-                if used + u['credits'] <= 40:
+                if used + u['credits'] <= COMPENSATION_CAP:
                     compensated.add(u['idx'])
                     used += u['credits']
                 # else over cap → R2
         else:
-            # >40 credits, all in the zone: non-core (and not a 2nd attempt) → C, no cap.
+            # Over the cap, all in the zone: non-core (and not a 2nd attempt) → C, no cap.
             for u in units:
                 if not u['core'] and not u['must_pass'] and not u['r2_en']:
                     compensated.add(u['idx'])
 
-        return {idx for idx in self.deferred_idx if idx in compensated}
+        return compensated
+
+    def _analyse_deferrals(self, classyear):
+        """Decide which deferrals (EA/CA, years 1/2) are optional, and whether the
+        optional set outgrows the compensation allowance.
+
+        Returns (optional_idx, note): the deferred-unit indices whose resit is
+        optional, and a Notes-column instruction (or None).
+
+        A deferral is optional when the student passes the unit anyway — either
+
+          * its mark already meets PASS_MARK (a pass on marks), or
+          * it is a zone (30-39%) mark that would have been compensated had it been
+            an ordinary failure.
+
+        For the second test the EA/CA units are assumed to have been passed, so the
+        student's *other* deferrals are left out of the compensation pool: an excused
+        unit no longer drags its fellow deferrals onto the stricter referral path.
+        Only the real failures sit alongside the deferral being tested.
+
+        Compensation is capped at COMPENSATION_CAP credits, and the real failures use
+        that allowance up: compensated credits consume it directly, and referred
+        credits are reserved against it (a referral may itself need compensating at
+        the resit).  So the credits available to the optional deferrals are
+        COMPENSATION_CAP minus every failed credit.  When the optional zone deferrals
+        do not all fit, they are still *all* flagged optional — any of them may be the
+        one resat — and *note* asks the student to resit enough credits to bring the
+        compensation back within the cap.
+
+        Must-pass units (labs, must-pass maths) are never compensated and a deferred
+        mark below the zone (< MIN_MARK) is never compensated, so both keep their
+        deferral mandatory.
+        """
+        if classyear not in _DEFERRAL_CLASSYEARS or not self.deferred_idx:
+            return set(), None
+
+        optional  = set()
+        zone_idx  = []   # zone deferrals that are optional only by virtue of compensation
+        for idx in self.deferred_idx:
+            unit = self.units[idx]
+            if 'R1' not in (unit.output_code or '').split('_'):
+                continue                                # not offered as a first-attempt resit
+            num = _numeric_mark(unit.mark)
+            if num is not None and num >= PASS_MARK:
+                optional.add(idx)                       # passes on marks; needs no compensation
+                continue
+            if num is None or not (num > MIN_MARK):
+                continue                                # below the zone → never compensated
+            # Would this zone mark have been compensated as an ordinary failure,
+            # alongside the real failures only?
+            if idx in self._replay_compensation(set(self.failed_idx) | {idx}, classyear):
+                optional.add(idx)
+                zone_idx.append(idx)
+
+        # Compensation allowance left over from the student's real failures.
+        failed_creds    = sum(self.units[i].credits or 0 for i in self.failed_idx)
+        allowance       = max(0, COMPENSATION_CAP - failed_creds)
+        zone_creds      = sum(self.units[i].credits or 0 for i in zone_idx)
+
+        note = None
+        if zone_creds > allowance:
+            shortfall = zone_creds - allowance
+            names     = ', '.join(self.units[i].coursename or self.units[i].module
+                                  for i in zone_idx)
+            note = (f"resit >={shortfall} credits of {{{names}}} "
+                    f"to bring compensation within {COMPENSATION_CAP} credits")
+
+        return optional, note
 
     def calc_yearmark(self, classyear=None):
         """Set self.yearmark to the credit-weighted mean of all unit marks.
@@ -2056,7 +2090,7 @@ class StudentInfo:
         referred_idx        = []
         referred_courses    = []
 
-        if failed_credits <= 40 and not some_unit_under_30:
+        if failed_credits <= COMPENSATION_CAP and not some_unit_under_30:
             # --- full compensation path ---
             for idx in other_failed_idx:
                 unit       = self.units[idx]
@@ -2105,7 +2139,7 @@ class StudentInfo:
                         unit.output_code = _append_code(unit.output_code, 'R2')
                         referred_idx.append(idx)
                         referred_courses.append(coursename)
-                    elif compensation_used + (unit.credits or 0) <= 40:
+                    elif compensation_used + (unit.credits or 0) <= COMPENSATION_CAP:
                         if idx in r2_en_idx:
                             self.fail        = True
                             self.fail_reason = 'Failed 2nd attempt'
@@ -2167,13 +2201,12 @@ class StudentInfo:
             if any((self.units[i].coursename or self.units[i].module) in MUST_PASS_LAB
                    for i in referred_idx):
                 self.fail_reason = 'Resit failed lab'
-            compensatable = self._compensatable_deferrals(classyear)
-            resit_parts = [
-                f"{c}[1opt]" if self._deferral_optional(i, compensatable) else f"{c}[1]"
-                for i, c in zip(self.deferred_idx, self.deferred_courses)
-            ]
-            resit_parts += referred_courses
-            self.resits = ' / '.join(p for p in resit_parts if p) or None
+            # Rebuild the single 'Resits' column as the deferrals (with their
+            # optional flags, decided in exclude_units) followed by the referrals.
+            self._build_deferral_columns()
+            resit_parts  = [p for p in (self.resits or '').split(' / ') if p]
+            resit_parts += [c for c in referred_courses if c]
+            self.resits  = ' / '.join(resit_parts) or None
 
     def __repr__(self):
         return (f'StudentInfo(emplid={self.emplid!r}, name={self.name!r}, '
@@ -2660,10 +2693,10 @@ def write_students(students, outpath, classyear, hide_id_cols=True):
             attr  = _TRAILING_ATTR.get(tname)
             value = getattr(s, attr) if attr else s.trailing.get(tname)
             if tname == 'Notes':
-                # Carry-forward notes plus any Notes text from the input grid,
-                # cf_flags first, dropping blanks and duplicates.
+                # Carry-forward notes, any Notes text from the input grid, and any
+                # 'resit >= n credits' instruction, dropping blanks and duplicates.
                 parts = []
-                for p in (s.cf_flags, s.trailing.get('Notes')):
+                for p in (s.cf_flags, s.trailing.get('Notes'), s.resit_note):
                     p = str(p).strip() if p is not None else ''
                     if p and p not in parts:
                         parts.append(p)
