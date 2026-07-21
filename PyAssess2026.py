@@ -13,6 +13,11 @@
 # How to run:
 # Python PyAssess2026.py --classyear 1/1m/2m/31/31m/4/4m/all [ --fill_marks --sort ]
 # (change AY, INDIR and FILENAMES as appropriate)
+#
+# August resits (years 1 and 2 only) read the 3-line resit grids and write a
+# 3-line output alongside the June one, named '....resit.xlsx':
+# Python PyAssess2026.py --AY 2025 --classyear 1r/1mr/2r/2mr
+# Python PyAssess2026.py --AY 2025 --classyear all --resits
 
 import argparse
 import math
@@ -56,6 +61,7 @@ def _configure_ay(ay):
     global AY, INDIR, Y3_CREDITS_FILE, CF_FLAG_FILE, ABROAD_FILE
     global interrupt_list, manual_list, withdrawn_list, abroad_list
     global CLASSYEAR_FILES, ALL_CLASSYEARS
+    global RESIT_CLASSYEAR_FILES, ALL_RESIT_CLASSYEARS
 
     if ay == 2025:
         INDIR           = "data2025_newcodes"
@@ -80,6 +86,12 @@ def _configure_ay(ay):
             '4':   ('PHYS_1241_S2_Y4_Exam_Grids.xlsx',         f'FinalYear_MPhys.AY{ay}.xlsx'),
             '4m':  ('PHYS_1241_S2_Y4_MP_Exam_Grids.xlsx',      f'FinalYear_MMath.AY{ay}.xlsx'),
         }
+        RESIT_CLASSYEAR_FILES = {
+            '1':   ('PHYS_1241_Y1_RESIT_Exam_Grids.xlsx',      f'1styear_Physics.AY{ay}.resit.xlsx'),
+            '1m':  ('PHYS_1241_Y1_MP_RESIT_Exam_Grids.xlsx',   f'1styear_MathsPhysics.AY{ay}.resit.xlsx'),
+            '2':   ('PHYS_1241_Y2_RESIT_Exam_Grids.xlsx',      f'2ndyear_Physics.AY{ay}.resit.xlsx'),
+            '2m':  ('PHYS_1241_Y2_MP_RESIT_Exam_Grids.xlsx',   f'2ndyear_MathsPhysics.AY{ay}.resit.xlsx'),
+        }
     elif ay == 2026:
         INDIR           = "data2026"
         Y3_CREDITS_FILE = "level4&comp-2026.xlsx"
@@ -101,11 +113,20 @@ def _configure_ay(ay):
             '4':   ('PHYS_1251_S2_Y4_GRAD_EXAM_GRID.xlsx',    f'FinalYear_MPhys.AY{ay}.xlsx'),
             '4m':  ('PHYS_1251_S2_Y4_MP_GRAD_EXAM_GRID.xlsx', f'FinalYear_MMath.AY{ay}.xlsx'),
         }
+        # August resit grids — filenames follow the 2025 pattern; update when the
+        # 2026 resit grids arrive.
+        RESIT_CLASSYEAR_FILES = {
+            '1':   ('PHYS_1251_Y1_RESIT_EXAM_GRID.xlsx',      f'1styear_Physics.AY{ay}.resit.xlsx'),
+            '1m':  ('PHYS_1251_Y1_MP_RESIT_EXAM_GRID.xlsx',   f'1styear_MathsPhysics.AY{ay}.resit.xlsx'),
+            '2':   ('PHYS_1251_Y2_RESIT_EXAM_GRID.xlsx',      f'2ndyear_Physics.AY{ay}.resit.xlsx'),
+            '2m':  ('PHYS_1251_Y2_MP_RESIT_EXAM_GRID.xlsx',   f'2ndyear_MathsPhysics.AY{ay}.resit.xlsx'),
+        }
     else:
         sys.exit(f"Error: unsupported --AY {ay}; valid academic years: 2025, 2026")
 
     AY = ay
-    ALL_CLASSYEARS = list(CLASSYEAR_FILES.keys())
+    ALL_CLASSYEARS       = list(CLASSYEAR_FILES.keys())
+    ALL_RESIT_CLASSYEARS = list(RESIT_CLASSYEAR_FILES.keys())
 
 
 _configure_ay(AY)   # populate AY-dependent globals at import; main() re-runs it if --AY is given
@@ -245,9 +266,14 @@ CORE_MATHS_PHYSICS = frozenset({
 #   4 / 4m  = Year 4  MPhys (final year) / MMath (final year)
 #
 # Values: (input_filename, output_filename)
+#
+# August resit grids use the same classyear keys with an 'r' appended on the
+# command line ('1r', '1mr', '2r', '2mr'), or any classyear plus --resits.  Only
+# years 1 and 2 have resits.  Their files live in RESIT_CLASSYEAR_FILES.
 
-# CLASSYEAR_FILES (classyear -> (input_file, output_file)) and ALL_CLASSYEARS are
-# populated per academic year by _configure_ay() near the top of this file.
+# CLASSYEAR_FILES (classyear -> (input_file, output_file)), RESIT_CLASSYEAR_FILES
+# and ALL_CLASSYEARS / ALL_RESIT_CLASSYEARS are populated per academic year by
+# _configure_ay() near the top of this file.
 
 # Human-readable description for each classyear key (used in reports).
 _CY_DESC = {
@@ -274,6 +300,37 @@ DATA_START_ROW = 6   # 0-indexed: row 7 — first student row
 # Within each unit block the four columns of interest sit at these offsets
 # from the unit's start column (Module, Link1, Link2, Mark, EN, Mit Circs, ...)
 _UNIT_COL_OFFSETS = {'module': 0, 'mark': 3, 'en': 4, 'mit_circs': 5}
+
+# ---------------------------------------------------------------------------
+# Resit ("3 line format") grids
+# ---------------------------------------------------------------------------
+# August resit grids carry three rows per student instead of one:
+#   row 1 — module codes and the original (June) outcomes: 'AS Code' is the
+#           status, 'Yr Mk / GPA' the year mark, 'Units Passed 2'/'Units Taken'
+#           the credits.  Copied straight through to the output, never recomputed.
+#   row 2 — the June marks, with the resit each unit was offered in the EN column
+#           ('R1'/'A1' = first attempt, 'R2'/'A2' = second attempt).
+#   row 3 — the August resit marks, with any resit EN code (e.g. 'XN' = missed).
+# The sheet has no separate 'Mark' column: the mark sits under the 'Module'
+# header on rows 2 and 3, and the block carries an extra 'Module2' column, so the
+# per-unit offsets differ from the June grids.
+RESIT_SHEET_NAME        = 'Style A With Gradebook RESIT'
+_RESIT_UNIT_COL_OFFSETS = {'module': 0, 'mark': 0, 'en': 4, 'mit_circs': 5}
+RESIT_ROWS_PER_STUDENT  = 3
+
+# EN codes on the June row naming the attempt the August resit counts as.
+_RESIT_FIRST_ATTEMPT_CODES  = frozenset({'R1', 'A1'})
+_RESIT_SECOND_ATTEMPT_CODES = frozenset({'R2', 'A2'})
+
+# Of those, the code that means the June sitting was deferred rather than sat, so
+# the unit carried no June result and stood outside the June year mark.  An 'A'
+# code is a reassessment of a mark the student did earn (a lab on 39 offered a
+# coursework-only resit, say), which counted in June like any other fail.
+_RESIT_DEFERRED_CODES = frozenset({'R1'})
+
+# Resit marks at a second attempt are capped at MIN_MARK for the year average
+# (see apply_resit_marks).
+RESIT_CAP = 30.0
 
 # ===========================================================================
 # Data classes
@@ -482,14 +539,18 @@ def _mark_suffix(value):
 
 
 def _mark_accepted(value):
-    """True if a unit mark counts as a pass.
+    """True if a unit mark counts as a pass, earning the unit's credits.
 
-    A mark passes when its numeric value meets or exceeds PASS_MARK, or when it carries a
-    'C' (compensated) or 'R' (passed resit) accept-suffix — the board has accepted
-    such a mark, so the unit counts as passed even below PASS_MARK.
+    A mark passes when its numeric value meets or exceeds PASS_MARK, or when it
+    carries an 'R' suffix — a resit passed at a capped mark, where the credits are
+    earned.  A 'C' (compensated) suffix does not count as a pass: the board lets
+    the failure stand without a further attempt, but the credits are not passed —
+    the same treatment as a compensation this program works out for itself, which
+    likewise stays out of credits_passed.  So a mark already carrying the board's
+    'C' from an earlier sitting is handled exactly as the bare failing mark was.
     """
     num = _numeric_mark(value)
-    return (num is not None and num >= PASS_MARK) or _mark_suffix(value) in ('C', 'R')
+    return (num is not None and num >= PASS_MARK) or _mark_suffix(value) == 'R'
 
 
 def _order_units(units):
@@ -511,9 +572,18 @@ def _order_units(units):
 
 
 class UnitInfo:
-    """Data for a single unit (module) for one student."""
+    """Data for a single unit (module) for one student.
+
+    In a June grid *mark* is simply the mark read from the grid.  In an August
+    resit grid it is the mark the unit is assessed on — the better of the June
+    and resit marks (see apply_resit_marks) — while june_mark and resit_mark keep
+    the two attempts for output, and calc_mark holds the capped value that
+    contributes to the year average.
+    """
     __slots__ = ('unit_name', 'module', 'coursename', 'credits', 'mark', 'en', 'mit_circs',
-                 'passed', 'excluded', 'output_code', 'capped')
+                 'passed', 'excluded', 'output_code', 'capped',
+                 'june_mark', 'june_code', 'resit_mark', 'resit_en', 'resat',
+                 'resit_taken', 'calc_mark')
 
     def __init__(self, unit_name, module, mark, en, mit_circs):
         self.unit_name   = unit_name              # 'Unit 1', 'Unit 2', etc.
@@ -526,6 +596,14 @@ class UnitInfo:
         self.excluded    = False                  # True if excluded from year mark
         self.output_code = None                   # code(s) written to the output code column
         self.capped      = False                  # True if mark is capped at 30.0 for year mark (R2 attempt)
+        # --- resit grids only (all left at their June-grid defaults otherwise) ---
+        self.june_mark   = mark                   # mark from the June row (output row 2)
+        self.june_code   = None                   # raw June-row EN code, echoed to output row 2
+        self.resit_mark  = None                   # August resit mark (output row 3), or None
+        self.resit_en    = None                   # EN code beside the resit mark (e.g. 'XN')
+        self.resat       = False                  # True if a resit mark is present
+        self.resit_taken = False                  # True if the resit was actually sat (resat and not 'XN')
+        self.calc_mark   = None                   # year-mark contribution when it differs from mark
 
     def __repr__(self):
         return (f'UnitInfo({self.unit_name}, coursename={self.coursename!r}, '
@@ -541,7 +619,7 @@ class StudentInfo:
         'is_pp', 'is_abroad',
         'AS_code', 'RFYR', 'RYOA', 'RYIA', 'COMP',
         'units_passed', 'award', 'classification',
-        'units', 'trailing',
+        'units', 'trailing', 'orig_trailing', 'is_resit',
         'yearmark',
         'credits_taken', 'credits_passed', 'credits_excluded', 'credits_deferred', 'creds_passed_taken',
         'excluded_idx', 'excluded_courses',
@@ -597,6 +675,8 @@ class StudentInfo:
         self.classification = None
         self.units          = []     # list of UnitInfo, one per unit column block
         self.trailing       = {}     # trailing columns: normalised name -> value
+        self.orig_trailing  = None   # resit grids: the June outcomes read from the input
+        self.is_resit       = False  # True when processing an August resit grid
         self.yearmark           = None   # credit-weighted average of unit marks
         self.credits_taken      = None   # total credits with a mark
         self.credits_passed     = None   # credits where mark >= PASS_MARK
@@ -674,6 +754,11 @@ class StudentInfo:
                             in credits_passed.
           AA in mit_circs → excluded from year mark, treated as passed for progression,
                             output_code set to 'X'.
+          EB in mit_circs → mitigating circumstances at the August resit sitting that
+                            were not there in June. The board grants a further attempt,
+                            so a unit still failing is referred again ('R2', see
+                            calc_referrals) instead of counting as a spent last attempt.
+                            The code is represented by that referral, not echoed.
           AA + a deferral code (EA or CA) both present → early grids carry both an
                             exclusion and a deferral code; the exam board later resolves
                             them to one. Until then they are resolved here by result: a
@@ -681,10 +766,10 @@ class StudentInfo:
                             code (the deferral itself only applies in years 1/2; in years
                             3/4 a combined code falls back to 'AA'). Both input codes are
                             copied to the output column (before the action code) for info.
-          credits_passed is determined by mark (>= PASS_MARK) or an accepted-mark
-          suffix ('C' compensated / 'R' passed resit), regardless of exclusion
-          codes.  Excluded units whose mark does not pass instead count toward the
-          progression check via credits_deferred.
+          credits_passed is determined by mark (>= PASS_MARK) or an 'R' passed-resit
+          suffix, regardless of exclusion codes; a 'C' compensated suffix does not
+          earn the credits (see _mark_accepted).  Excluded units whose mark does not
+          pass instead count toward the progression check via credits_deferred.
         """
         taken            = 0
         passed           = 0
@@ -721,7 +806,7 @@ class StudentInfo:
             has_ca        = 'CA' in mit_codes
             defer_code    = 'EA' if has_ea else ('CA' if has_ca else None)  # deferral code present (EA preferred)
             both_aa_defer = has_aa and defer_code is not None
-            # course_passed honours the 'C'/'R' accept-suffix (see _mark_accepted).
+            # course_passed honours the 'R' passed-resit suffix (see _mark_accepted).
             course_passed = _mark_accepted(unit.mark)
 
             if both_aa_defer:
@@ -735,6 +820,12 @@ class StudentInfo:
             if eff_code in ('EA', 'CA') and classyear not in _DEFERRAL_CLASSYEARS:
                 # No deferral outside years 1/2: a combined code becomes AA, a lone deferral is left.
                 eff_code = 'AA' if has_aa else None
+            if unit.resit_taken:
+                # Resit grids repeat the June mitigation code on all three rows.  A
+                # deferral or exclusion the student has since sat the resit for is
+                # spent: the resit mark stands on its own and is processed normally.
+                # Both codes still echo to the output for information.
+                eff_code = None
 
             # --- EA / CA deferral (years 1/2 only) ---
             if eff_code in ('EA', 'CA'):
@@ -798,12 +889,24 @@ class StudentInfo:
             elif unit.excluded:
                 deferred_creds += unit.credits
 
+            # --- EB: mitigating circumstances at the resit sitting, not in June ---
+            # The board grants a further attempt, so a unit still failing is referred
+            # again rather than being at its last one (see calc_referrals).  Like a
+            # lone deferral the code is represented by the referral it produces, so
+            # it is not also echoed; on a unit that passed there is nothing to grant
+            # and the code carries through for information as usual.
+            if 'EB' in mit_codes and not unit.passed:
+                used_mit.add('EB')
+
             # --- assemble output_code: all input codes first, then any action codes ---
             # Input codes are the unprocessed EN and mit_circs codes carried through for
             # info; action codes (X, R1, ...) generated by the rules above come after,
             # e.g. 'XN_X' not 'X_XN', 'AA_EA_R1' not 'R1_AA_EA'.
             input_codes = []
             att_codes   = []   # input-EN 'R1'/'R2' → '1st att.'/'2nd att.', shown after any other codes
+            # In a resit grid the attempt code is already shown beside the June mark
+            # (unit.june_code), so it is not repeated in the computed code column.
+            show_att = unit.june_code is None
             for code in sorted(en_codes - used_en):
                 if code == 'R2':
                     # A 'C' (compensated) or 'R' (passed resit) suffix means the
@@ -811,10 +914,12 @@ class StudentInfo:
                     # '2nd att.' note is redundant, so omit it.  Otherwise label the
                     # attempt and cap the mark at 30 in the year mark.
                     if _mark_suffix(unit.mark) not in ('C', 'R'):
-                        att_codes.append('2nd att.')
+                        if show_att:
+                            att_codes.append('2nd att.')
                         unit.capped = True
                 elif code == 'R1':
-                    att_codes.append('1st att.')   # 1st-attempt resit: treated normally, labelled for clarity
+                    if show_att:
+                        att_codes.append('1st att.')   # 1st-attempt resit: treated normally, labelled for clarity
                 else:
                     input_codes.append(code)
             input_codes.extend(sorted(mit_codes - used_mit))   # mit codes not consumed by a rule
@@ -1009,7 +1114,13 @@ class StudentInfo:
             mark = _numeric_mark(unit.mark)
             if mark is None:
                 continue
-            calc_mark = min(mark, 30.0) if unit.capped else mark
+            # Resit grids set calc_mark explicitly (the capped resit mark, or the
+            # June mark where that is higher); elsewhere a 2nd-attempt mark is
+            # capped at 30 and every other mark counts in full.
+            if unit.calc_mark is not None:
+                calc_mark = unit.calc_mark
+            else:
+                calc_mark = min(mark, 30.0) if unit.capped else mark
             weighted_marks += calc_mark * unit.credits
             total_credits  += unit.credits
             if mp:
@@ -1784,8 +1895,8 @@ class StudentInfo:
                           and self.project_mark >= PASS_MARK)
             if not project_ok and self.project_mark is not None:
                 # Accept a project whose combined mark is below pass only because a
-                # contributing unit carries a 'C'/'R' accept-suffix (compensated /
-                # passed resit); every present project unit must be accepted.
+                # contributing unit carries an 'R' passed-resit suffix; every present
+                # project unit must be accepted.
                 proj_units = [u for u in self.units
                               if (u.coursename or u.module or '') in PROJECT_MODULES
                               and _numeric_mark(u.mark) is not None]
@@ -1977,7 +2088,9 @@ class StudentInfo:
         Units with EN code 'R2' were already taken as a 2nd attempt; no further
         resit can be offered.  If such a unit has mark < 30%, or is in the zone
         (30-39%), the student fails outright — 2nd-attempt units are never
-        compensated.
+        compensated.  An 'EB' beside it in the mitigating circumstances lifts that:
+        the board has granted a further attempt, so the unit is referred like any
+        other failure.
 
         Y1/Y2 paths:
           Full compensation (failed <= 40 credits, no unit under 30%):
@@ -1988,24 +2101,40 @@ class StudentInfo:
             zone non-core over cap → R2 (or FAIL if R2-in-EN).
           >40 credits, no unit under 30%:
             Must-pass/core zone units → R2 (or FAIL if R2-in-EN); non-core → C.
+
+        In an August resit grid (self.is_resit) the same rules run, with one
+        change: a unit already at its second attempt has no sitting left, so where
+        these rules would refer it on it is compensated instead — provided its mark
+        is in the 30-39% zone, it is not a must-pass unit and its credits fit the
+        compensation allowance.  A second attempt below 30%, a must-pass failure
+        and credits beyond the allowance all still fail the student, and units at a
+        first attempt (a June deferral, resat in August) are unaffected and may be
+        referred to a second attempt as usual.
         """
         if classyear in FINAL_CLASSYEARS:
             return
 
         # Lab (MUST_PASS_LAB) units with mark == 39 (and not already at R2 attempt) are
         # zone failures, not outright fails.  R2-in-EN labs lose that exception
-        # because no further resit can be offered.
+        # because no further resit can be offered — and so does a lab in a resit
+        # grid that has already been through the August round, whatever attempt it
+        # was counted as: the partial resit the exception exists for is spent.
         lab_near_pass_idx = set()
         r2_en_idx         = set()   # failed units whose EN column contains 'R2'
         for idx in self.failed_idx:
             unit       = self.units[idx]
             coursename = unit.coursename or unit.module
             en_codes   = _split_codes(unit.en)
-            is_r2_en   = 'R2' in en_codes
+            # 'EB' in the mitigating circumstances marks circumstances raised at the
+            # August sitting that were not there in June: the board grants a further
+            # attempt, so the unit is not at its last one and is referred again like
+            # any other failure, rather than failing the student outright.
+            is_r2_en   = 'R2' in en_codes and 'EB' not in _split_codes(unit.mit_circs)
             if is_r2_en:
                 r2_en_idx.add(idx)
             if coursename in MUST_PASS_LAB and not is_r2_en:
-                if _numeric_mark(unit.mark) == 39.0:
+                if (_numeric_mark(unit.mark) == 39.0
+                        and not (self.is_resit and unit.june_code)):
                     lab_near_pass_idx.add(idx)
 
         # A lab on exactly 39 is offered a partial (coursework-only) resit, not a
@@ -2090,6 +2219,17 @@ class StudentInfo:
         referred_idx        = []
         referred_courses    = []
 
+        # In an August resit grid a unit already at its second attempt has no
+        # sitting left, so it can never be referred on.  Where the June rules would
+        # refer it the board compensates instead, provided the mark is in the
+        # compensation zone, the unit is not a must-pass one and the credits fit the
+        # allowance; anything else still fails the student.  Empty for June grids,
+        # which leaves every rule below exactly as it was.
+        r2_final_idx = {idx for idx in r2_en_idx
+                        if self.is_resit
+                        and (self.units[idx].coursename or self.units[idx].module)
+                        not in must_pass_for_cy}
+
         if failed_credits <= COMPENSATION_CAP and not some_unit_under_30:
             # --- full compensation path ---
             for idx in other_failed_idx:
@@ -2104,7 +2244,7 @@ class StudentInfo:
                     referred_idx.append(idx)
                     referred_courses.append(coursename)
                 else:
-                    if idx in r2_en_idx:
+                    if idx in r2_en_idx and idx not in r2_final_idx:
                         self.fail        = True
                         self.fail_reason = 'Failed 2nd attempt'
                         return
@@ -2131,7 +2271,8 @@ class StudentInfo:
                 else:
                     zone_idx.append(idx)
                     zone_courses.append(coursename)
-                    if coursename in core_for_cy or coursename in must_pass_for_cy:
+                    if ((coursename in core_for_cy or coursename in must_pass_for_cy)
+                            and idx not in r2_final_idx):
                         if idx in r2_en_idx:
                             self.fail        = True
                             self.fail_reason = 'Failed (< 30%) 2nd attempts'
@@ -2140,7 +2281,7 @@ class StudentInfo:
                         referred_idx.append(idx)
                         referred_courses.append(coursename)
                     elif compensation_used + (unit.credits or 0) <= COMPENSATION_CAP:
-                        if idx in r2_en_idx:
+                        if idx in r2_en_idx and idx not in r2_final_idx:
                             self.fail        = True
                             self.fail_reason = 'Failed 2nd attempt'
                             return
@@ -2165,7 +2306,8 @@ class StudentInfo:
                 coursename = unit.coursename or unit.module
                 zone_idx.append(idx)
                 zone_courses.append(coursename)
-                if coursename in core_for_cy or coursename in must_pass_for_cy:
+                if ((coursename in core_for_cy or coursename in must_pass_for_cy)
+                        and idx not in r2_final_idx):
                     if idx in r2_en_idx:
                         self.fail        = True
                         self.fail_reason = 'Failed (< 30%) 2nd attempts'
@@ -2174,7 +2316,7 @@ class StudentInfo:
                     referred_idx.append(idx)
                     referred_courses.append(coursename)
                 else:
-                    if idx in r2_en_idx:
+                    if idx in r2_en_idx and idx not in r2_final_idx:
                         self.fail        = True
                         self.fail_reason = 'Failed 2nd attempt'
                         return
@@ -2235,8 +2377,9 @@ _STUDENT_COLS = [
 ]
 
 # Sub-header names that belong to a unit block (used to find where trailing
-# columns begin after the last unit)
-_UNIT_SUBHEADERS = {'Module', 'Link1', 'Link2', 'Mark', 'EN', 'GBN'}
+# columns begin after the last unit).  Resit grids add a 'Module2' column.
+_UNIT_SUBHEADERS       = {'Module', 'Link1', 'Link2', 'Mark', 'EN', 'GBN'}
+_RESIT_UNIT_SUBHEADERS = _UNIT_SUBHEADERS | {'Module2'}
 
 
 def _cell(row, col):
@@ -2252,12 +2395,40 @@ def _norm_header(val):
     return str(val).replace('\n', ' ').strip()
 
 
-def read_students(filepath):
+def _resit_sheet_name(filepath):
+    """Return the resit sheet name in *filepath*.
+
+    Prefers RESIT_SHEET_NAME, falling back to any sheet whose name mentions a
+    resit, so a renamed tab does not stop the run.
+    """
+    names = pd.ExcelFile(filepath).sheet_names
+    if RESIT_SHEET_NAME in names:
+        return RESIT_SHEET_NAME
+    for name in names:
+        if 'resit' in name.lower():
+            return name
+    raise ValueError(f"No resit sheet found in {filepath}; "
+                     f"expected {RESIT_SHEET_NAME!r}, got {names}")
+
+
+def read_students(filepath, resit=False):
     """Read 'Style A Plus With Gradebook' from *filepath*.
 
-    Returns a list of StudentInfo objects, one per student row.
+    Returns a list of StudentInfo objects, one per student.
+
+    With *resit* set, reads an August resit grid instead: the
+    RESIT_SHEET_NAME sheet, RESIT_ROWS_PER_STUDENT rows per student, and the
+    resit column offsets.  Each unit then carries the June mark and its attempt
+    code (row 2) plus the resit mark and its EN code (row 3); the trailing
+    columns are read from row 1 and hold the original June outcomes.  Call
+    apply_resit_marks() afterwards to derive the marks the pipeline runs on.
     """
-    df = pd.read_excel(filepath, sheet_name=SHEET_NAME,
+    sheet   = _resit_sheet_name(filepath) if resit else SHEET_NAME
+    offsets = _RESIT_UNIT_COL_OFFSETS if resit else _UNIT_COL_OFFSETS
+    subhdrs = _RESIT_UNIT_SUBHEADERS if resit else _UNIT_SUBHEADERS
+    n_lines = RESIT_ROWS_PER_STUDENT if resit else 1
+
+    df = pd.read_excel(filepath, sheet_name=sheet,
                        header=None, dtype=object)
 
     unit_row   = df.iloc[UNIT_LABEL_ROW]
@@ -2281,7 +2452,7 @@ def read_students(filepath):
     for c in range(last_unit_start, n_cols):
         h = _norm_header(header_row.iloc[c])
         is_unit_sub = (
-            h in _UNIT_SUBHEADERS
+            h in subhdrs
             or h.startswith('AM')
             or 'Mit' in h
             or h == ''
@@ -2293,12 +2464,13 @@ def read_students(filepath):
     unit_ends = unit_starts[1:] + [trailing_start]
 
     # For each unit, record the absolute column index for the 4 fields
-    # using fixed offsets (Module+0, Mark+3, EN+4, Mit Circs+5).
+    # using fixed offsets (June: Module+0, Mark+3, EN+4, Mit Circs+5;
+    # resit: the mark shares the Module column, see _RESIT_UNIT_COL_OFFSETS).
     unit_col_map = []   # list of (unit_name, module_c, mark_c, en_c, mit_c)
     for start, end in zip(unit_starts, unit_ends):
         unit_name = unit_row.iloc[start]
         cols = {field: start + offset
-                for field, offset in _UNIT_COL_OFFSETS.items()
+                for field, offset in offsets.items()
                 if start + offset < end}
         unit_col_map.append((
             unit_name,
@@ -2321,10 +2493,20 @@ def read_students(filepath):
     # strings so the list tolerates int or string entries).
     abroad_emplids = {str(e) for e in abroad_list}
 
+    data_rows = [row for _, row in df.iloc[DATA_START_ROW:].iterrows()
+                 if not pd.isna(row.iloc[0])]
+    if n_lines > 1 and len(data_rows) % n_lines:
+        raise ValueError(f"{filepath}: {len(data_rows)} data rows is not a whole "
+                         f"number of {n_lines}-row students")
+
     students = []
-    for _, row in df.iloc[DATA_START_ROW:].iterrows():
-        if pd.isna(row.iloc[0]):
-            continue
+    for i in range(0, len(data_rows), n_lines):
+        lines = data_rows[i:i + n_lines]
+        row   = lines[0]           # module codes and (resit grids) the June outcomes
+        if len({_norm_eid(l.iloc[0]) for l in lines}) > 1:
+            raise ValueError(f"{filepath}: rows {i + 1}-{i + n_lines} of the data "
+                             f"block hold different emplids "
+                             f"{[l.iloc[0] for l in lines]}")
 
         s = StudentInfo()
         for attr, col in _STUDENT_COLS:
@@ -2335,22 +2517,46 @@ def read_students(filepath):
             or str(s.emplid) in abroad_emplids
         )
 
-        s.units = [
-            UnitInfo(
-                unit_name,
-                _cell(row, mc),
-                _cell(row, mk),
-                _cell(row, en),
-                _cell(row, mit),
-            )
-            for unit_name, mc, mk, en, mit in unit_col_map
-        ]
+        if resit:
+            june, aug = lines[1], lines[2]
+            s.units = []
+            for unit_name, mc, mk, en, mit in unit_col_map:
+                # Module code from row 1, marks and codes from rows 2 and 3.  The
+                # mitigating-circumstances code is taken from the resit row, as
+                # instructed: it is the one that applies to the attempt just sat.
+                u = UnitInfo(unit_name, _cell(row, mc), _cell(june, mk),
+                             _cell(june, en), _cell(aug, mit))
+                u.june_code  = _cell(june, en)
+                u.resit_mark = _cell(aug, mk)
+                u.resit_en   = _cell(aug, en)
+                s.units.append(u)
+        else:
+            s.units = [
+                UnitInfo(
+                    unit_name,
+                    _cell(row, mc),
+                    _cell(row, mk),
+                    _cell(row, en),
+                    _cell(row, mit),
+                )
+                for unit_name, mc, mk, en, mit in unit_col_map
+            ]
         # Output ordering: lab first, then project/dissertation, then the rest in
         # input order. Done here (before any per-unit index lists are built) so the
         # whole pipeline and the output grid share one consistent unit order.
         s.units = _order_units(s.units)
 
         s.trailing = {name: _cell(row, c) for c, name in trailing_cols}
+        if resit:
+            # The June row's Notes hold the June exam board's outcome text; keep it
+            # with the other original outcomes read from row 1.
+            june_notes = _cell(lines[1], next((c for c, n in trailing_cols
+                                               if n == 'Notes'), 0))
+            s.orig_trailing = dict(s.trailing)
+            s.orig_trailing['Notes'] = '; '.join(
+                str(p).strip() for p in (s.trailing.get('Notes'), june_notes)
+                if p is not None and str(p).strip()
+            ) or None
 
         # 'AS Code' (Achievement Status) column → dedicated field plus flags.
         s.AS_code = s.trailing.get('AS Code')
@@ -2363,6 +2569,139 @@ def read_students(filepath):
         students.append(s)
 
     return students
+
+
+def apply_resit_marks(students):
+    """Fold the August resit marks into each unit, ready for the normal pipeline.
+
+    Called once after read_students(..., resit=True) and before exclude_units().
+    For every unit that was resat this sets, from the June mark and the resit mark:
+
+      unit.mark      the mark the unit is assessed on — the better of the two, so a
+                     resit that goes down cannot take a pass or a compensatable
+                     mark away.  Everything downstream (pass/fail, credits,
+                     compensation, referrals) then runs exactly as it does in June.
+      unit.calc_mark the mark that contributes to the year average.  For a second
+                     attempt ('R2'/'A2' on the June row) that is the June mark
+                     where it is already above the cap, and otherwise the resit
+                     mark capped at RESIT_CAP — so a second attempt that comes back
+                     lower than a sub-30 June mark does lower the year average,
+                     even though the unit is still assessed on the better mark.  A
+                     first attempt ('R1'/'A1' — a June deferral) is not capped and
+                     takes the better of the two, and neither is a lab sitting on
+                     39 offered a partial 'A2' reassessment.
+      unit.en        the June attempt code normalised to 'R1'/'R2' and joined with
+                     any code beside the resit mark, so the standard rules see a
+                     second attempt as one (no further resit is available).
+
+    Units with no resit mark keep their June mark and are processed unchanged.
+    Returns a list of warning lines for the report.
+    """
+    warnings = []
+    for s in students:
+        s.is_resit = True
+        for unit in s.units:
+            unit.resat = not _mark_missing(unit.resit_mark)
+            june_codes = _split_codes(unit.june_code)
+            resit_codes = _split_codes(unit.resit_en)
+            unit.resit_taken = unit.resat and 'XN' not in resit_codes
+
+            first  = bool(june_codes & _RESIT_FIRST_ATTEMPT_CODES)
+            second = bool(june_codes & _RESIT_SECOND_ATTEMPT_CODES)
+            # The EN column the standard rules read: the attempt normalised to
+            # R1/R2, any other June code (e.g. a carried 'L1C'), then the resit's
+            # own codes.
+            attempt = 'R2' if second else ('R1' if first else None)
+            en_parts = ([attempt] if attempt else []) + sorted(
+                june_codes - _RESIT_FIRST_ATTEMPT_CODES - _RESIT_SECOND_ATTEMPT_CODES
+            ) + sorted(resit_codes)
+            unit.en = ' '.join(en_parts) or None
+
+            if not unit.resat:
+                continue
+
+            june_num  = _numeric_mark(unit.june_mark)
+            resit_num = _numeric_mark(unit.resit_mark)
+            if resit_num is None:
+                continue                      # non-numeric resit entry: leave the June mark
+            if attempt is None:
+                warnings.append(f"    {s.emplid}: {unit.coursename or unit.module} "
+                                f"has a resit mark but no attempt code — capped as a "
+                                f"2nd attempt")
+                second = True
+
+            # A lab on exactly 39 is offered a partial (coursework-only) reassessment
+            # rather than a resit, and the new mark counts in full.
+            lab_partial = ((unit.coursename or unit.module) in MUST_PASS_LAB
+                           and june_num == 39.0
+                           and bool(june_codes & {'A2'}))
+
+            # The unit is assessed on the better of the two attempts, so a resit
+            # that comes back lower cannot take away a pass or a compensatable
+            # mark.  The June value is kept whole (it may carry a 'C'/'R'
+            # accept-suffix) when it is the one that stands.
+            if june_num is None or resit_num >= june_num:
+                unit.mark = unit.resit_mark
+
+            if second and not lab_partial:
+                # Second attempt: the June mark counts only where it is already
+                # above the cap; otherwise the capped resit mark counts, even when
+                # that is the lower of the two.
+                unit.calc_mark = (june_num if june_num is not None and june_num > MIN_MARK
+                                  else min(resit_num, RESIT_CAP))
+            else:
+                # First attempt (or a lab's partial reassessment): uncapped, and
+                # never below what the June sitting already earned.
+                unit.calc_mark = (resit_num if june_num is None
+                                  else max(june_num, resit_num))
+    return warnings
+
+
+def compute_june_outcomes(students, classyear):
+    """Set each student's original (June) figures for the resit output's info row.
+
+    These are recomputed by running the ordinary rules over the June marks alone —
+    the same calculation that produced the June grid — rather than copied from the
+    university's own columns, which count a compensated unit as passed and average
+    over deferred ones.
+
+    The attempt code on the June row is what records the June board's decision, and
+    it is used in place of the mitigating circumstances: the MitCircs table the
+    grid looks up is refreshed after the June board, so the codes that produced
+    June's deferrals are no longer there to be read.  'R1' means the unit was
+    deferred, so it is fed back in as a deferral and drops out of the June year
+    mark; a second attempt ('R2'/'A2') means it was referred — a fail that counts —
+    so any deferral code beside it is dropped.  Units the board left alone keep
+    their mitigating circumstances as they stand.
+
+    Only the marks-based figures are produced.  The June status is deliberately
+    not shown: the outcome on the grid is the post-resit one, on the row below.
+    Runs on copies, so nothing on the live student is disturbed.
+    """
+    attempt_codes = _RESIT_FIRST_ATTEMPT_CODES | _RESIT_SECOND_ATTEMPT_CODES
+    for s in students:
+        june = StudentInfo()
+        june.units = []
+        for u in s.units:
+            codes = _split_codes(u.june_code)
+            if codes & _RESIT_DEFERRED_CODES:
+                mit = 'EA'                                   # deferred in June
+            elif codes & _RESIT_SECOND_ATTEMPT_CODES:
+                mit = ' '.join(sorted(_split_codes(u.mit_circs) - {'EA', 'CA'})) or None
+            else:
+                mit = u.mit_circs
+            june.units.append(
+                UnitInfo(u.unit_name, u.module, u.june_mark,
+                         ' '.join(sorted(codes - attempt_codes)) or None, mit)
+            )
+        june.exclude_units(classyear)
+        june.calc_yearmark(classyear)
+        s.orig_trailing.update({
+            'Creds Passed/Taken': june.creds_passed_taken,
+            'Year Mark':          june.yearmark,
+            'Phys Year Mark':     june.phys_yearmark,
+            'Math Year Mark':     june.math_yearmark,
+        })
 
 
 # ===========================================================================
@@ -2568,6 +2907,19 @@ _TRAILING_ATTR = {
     'Deg Class Actual':      'deg_class_actual',
 }
 
+# Resit output only: the trailing columns shown on the info row.  The marks-based
+# ones are recomputed from the June marks by compute_june_outcomes(); the text
+# ones are copied from the input.  Everything else — Status and Fail reason above
+# all — is left blank there: the grid's outcome is the post-resit one, and it
+# belongs on the June marks row below, which the resit is folded into.
+_ORIG_COMPUTED_COLS = ('Creds Passed/Taken', 'Year Mark',
+                       'Phys Year Mark', 'Math Year Mark')
+
+# Input trailing columns copied straight through onto the resit info row.
+_ORIG_PASSTHROUGH_COLS = frozenset({
+    'Notes', 'Pre-Exam Board Minutes', 'Exam Board Minutes',
+})
+
 # Excel number formats applied to trailing columns that hold computed floats.
 _TRAILING_FORMAT = {
     'Year Mark':      '0.0',
@@ -2584,12 +2936,27 @@ _TRAILING_FORMAT = {
 # Excel writing
 # ===========================================================================
 
-def write_students(students, outpath, classyear, hide_id_cols=True):
+def _orig_outcome(s, tname):
+    """Return the June value of trailing column *tname* for the resit info row,
+    or None if that column carries nothing there."""
+    src = s.orig_trailing or {}
+    if tname in _ORIG_COMPUTED_COLS or tname in _ORIG_PASSTHROUGH_COLS:
+        return src.get(tname)
+    return None
+
+
+def write_students(students, outpath, classyear, hide_id_cols=True, resit=False):
     """Write *students* to *outpath* in 2-row-per-student format.
 
     Row 1    : bold header — fixed labels, 'Unit N' merged over each pair, trailing labels
     Row 2n   : student info row  — fixed fields, module codes (merged), blank trailing
     Row 2n+1 : student marks row — marks and output codes per unit, blank trailing
+
+    With *resit* set, writes the 3-row resit format instead: the info row, the
+    June marks row, then a third row holding the August resit marks.  The info
+    row then carries the original June outcomes copied from the input, the June
+    row carries the recomputed outcomes and the June attempt codes, and the resit
+    row carries the resit marks with the newly computed output codes.
 
     Formatting:
     - Alternating grey fill (FFE0E0E0) on every other student pair
@@ -2605,14 +2972,15 @@ def write_students(students, outpath, classyear, hide_id_cols=True):
     u_start  = n_fixed + 1               # 1-based col of first unit pair
     t_start  = u_start + 2 * n_units     # 1-based col of first trailing col
     last_col = t_start - 1 + len(trailer_names)
-    n_rows   = 1 + 2 * len(students)
+    n_per    = 3 if resit else 2         # output rows per student
+    n_rows   = 1 + n_per * len(students)
 
-    # Rows that get a thick bottom border: header + every marks row
-    thick_rows = frozenset([1] + [2 + 2*i + 1 for i in range(len(students))])
+    # Rows that get a thick bottom border: header + the last row of each student
+    thick_rows = frozenset([1] + [1 + n_per * (i + 1) for i in range(len(students))])
 
     wb = Workbook()
     ws = wb.active
-    ws.title = '2 Line Format'
+    ws.title = '3 Line Format' if resit else '2 Line Format'
 
     # ------------------------------------------------------------------ widths
     for i, (label, _) in enumerate(_FIXED_COLS, start=1):
@@ -2644,8 +3012,9 @@ def write_students(students, outpath, classyear, hide_id_cols=True):
     pending_merges = []   # collected here; applied after the border pass
 
     for idx, s in enumerate(students):
-        info_row  = 2 + 2 * idx
+        info_row  = 2 + n_per * idx
         marks_row = info_row + 1
+        resit_row = info_row + 2 if resit else None
         fill = _FILL_GREY if idx % 2 == 1 else None
 
         ws.row_dimensions[info_row].height = _INFO_ROW_H
@@ -2688,20 +3057,29 @@ def write_students(students, outpath, classyear, hide_id_cols=True):
                               or 'R/X' in str(s.status or '')))
         beige_tname   = 'Overall' if 'Overall' in trailer_names else 'Year Mark'
 
-        # info row — trailing columns (computed attrs take priority; fall back to input value)
+        # trailing columns (computed attrs take priority; fall back to input value).
+        # In the 2-row format these sit on the info row; in the 3-row resit format
+        # the info row shows the original June outcomes instead and the recomputed
+        # ones move down to the June marks row.
         for j, tname in enumerate(trailer_names):
             attr  = _TRAILING_ATTR.get(tname)
             value = getattr(s, attr) if attr else s.trailing.get(tname)
+            if resit and not attr and tname in _ORIG_PASSTHROUGH_COLS:
+                value = None   # board minutes belong with the June outcomes, on the info row
             if tname == 'Notes':
                 # Carry-forward notes, any Notes text from the input grid, and any
                 # 'resit >= n credits' instruction, dropping blanks and duplicates.
+                # In resit output the input Notes belong with the original outcomes
+                # on the info row, so only the computed parts are repeated here.
+                sources = ((s.cf_flags, s.resit_note) if resit
+                           else (s.cf_flags, s.trailing.get('Notes'), s.resit_note))
                 parts = []
-                for p in (s.cf_flags, s.trailing.get('Notes'), s.resit_note):
+                for p in sources:
                     p = str(p).strip() if p is not None else ''
                     if p and p not in parts:
                         parts.append(p)
                 value = '; '.join(parts) or None
-            cell  = _c(info_row, t_start + j, value)
+            cell  = _c(marks_row if resit else info_row, t_start + j, value)
             fmt   = _TRAILING_FORMAT.get(tname)
             if fmt:
                 cell.number_format = fmt
@@ -2710,9 +3088,21 @@ def write_students(students, outpath, classyear, hide_id_cols=True):
             if is_borderline and tname == beige_tname:
                 cell.fill = _FILL_BEIGE
 
-        # marks row — fixed columns (blank; needed for fill and borders)
-        for i in range(1, n_fixed + 1):
-            _c(marks_row, i)
+        if resit:
+            # info row — the original June outcomes, copied from the input grid.
+            for j, tname in enumerate(trailer_names):
+                value = _orig_outcome(s, tname)
+                cell  = _c(info_row, t_start + j, value)
+                fmt   = _TRAILING_FORMAT.get(tname)
+                if fmt and isinstance(value, (int, float)):
+                    cell.number_format = fmt
+                if value == '-1':
+                    cell.alignment = _ALIGN_RIGHT
+
+        # mark rows — fixed columns (blank; needed for fill and borders)
+        for row in (r for r in (marks_row, resit_row) if r):
+            for i in range(1, n_fixed + 1):
+                _c(row, i)
 
         # marks row — unit marks and output codes
         # Fill priority: excluded by mitigating circumstances (a standalone 'X'
@@ -2721,16 +3111,28 @@ def write_students(students, outpath, classyear, hide_id_cols=True):
         # but its cell is coloured by its mark like any fail.  Else a fail →
         # pale pink (Y1/Y2 below MIN_MARK) or pale yellow (Y1/Y2 in the 30-39
         # zone, and all Y3/Y4 fails).
+        # A resit grid highlights the resat units only, on the resit row: the June
+        # sitting has been decided, and a unit with no August mark has nothing new
+        # to show.
         is_y12       = classyear in _DEFERRAL_CLASSYEARS   # Y1/Y2 classyears
         excluded_set = set(s.excluded_idx)
         failed_set   = set(s.failed_idx)
         deferred_set = set(s.deferred_idx)
         for i, unit in enumerate(s.units):
             col = u_start + 2 * i
-            mark_cell = _c(marks_row, col, unit.mark)
+            if resit:
+                # June mark and the attempt code it was offered on row 2; the resit
+                # mark and every newly computed code on row 3.  Any highlight goes
+                # on the resit row, beside the code it belongs to.
+                _c(marks_row, col,     unit.june_mark)
+                _c(marks_row, col + 1, unit.june_code)
+                _c(resit_row, col + 1, unit.output_code)
+                mark_cell = _c(resit_row, col, unit.resit_mark)
+            else:
+                mark_cell = _c(marks_row, col, unit.mark)
             mark_num  = _numeric_mark(unit.mark)
-            if suppress_fill:
-                pass  # not assessed this cycle: no status highlight
+            if suppress_fill or (resit and not unit.resat):
+                pass  # not assessed this cycle, or not resat: no status highlight
             elif i in excluded_set:
                 # Green only for mitigating-circumstances exclusions; carried
                 # marks are excluded but left unfilled.  Deferrals are also held
@@ -2751,11 +3153,12 @@ def write_students(students, outpath, classyear, hide_id_cols=True):
                     mark_cell.fill = _FILL_PALE_PINK
                 else:
                     mark_cell.fill = _FILL_PALE_YELLOW
-            _c(marks_row, col + 1, unit.output_code)
+            if not resit:
+                _c(marks_row, col + 1, unit.output_code)
 
-        # marks row — trailing
+        # blank trailing on the row that carries no outcomes
         for j in range(len(trailer_names)):
-            _c(marks_row, t_start + j)
+            _c(resit_row if resit else marks_row, t_start + j)
 
     # ---- border pass (must run before merge_cells) -------------------
     # thick_rows (header + every marks row) get a thin black bottom border.
@@ -3123,7 +3526,8 @@ def parse_args():
         help=(
             "Class year to process: 1, 2, 31, 32, 4 "
             "(append m/M for Maths+Physics equivalent). "
-            "Use 'all' or '*' to run all 10 (default)."
+            "Use 'all' or '*' to run all 10 (default). "
+            "Append 'r' (1r, 1mr, 2r, 2mr) to process that year's August resit grid."
         )
     )
     parser.add_argument(
@@ -3159,6 +3563,17 @@ def parse_args():
         )
     )
     parser.add_argument(
+        '--resits',
+        action='store_true',
+        default=False,
+        help=(
+            "Process the August resit grids: every classyear given is read as a "
+            "resit grid whether or not its name ends in 'r'. A classyear may also "
+            "be marked individually by appending 'r' (e.g. 1r, 2mr). Resits exist "
+            "for years 1 and 2 only."
+        )
+    )
+    parser.add_argument(
         '--resits_one_column',
         action='store_true',
         default=RESITS_ONE_COLUMN,
@@ -3171,18 +3586,30 @@ def parse_args():
     return parser.parse_args()
 
 
-def resolve_classyears(raw):
-    """Return the list of classyear keys to process."""
+def resolve_classyears(raw, resits=False):
+    """Return the classyears to process as a list of (classyear, is_resit) pairs.
+
+    A trailing 'r' selects the August resit grid for that classyear ('1r', '2mr'),
+    and *resits* (the --resits flag) does the same for every classyear given,
+    including 'all'.  Only years 1 and 2 have resit grids.
+    """
     val = raw.strip().lower().rstrip('/')
     if val in ('all', '*', ''):
-        return ALL_CLASSYEARS
-    val = val.replace('M', 'm')  # normalise upper-M
-    if val not in CLASSYEAR_FILES:
+        return ([(cy, True) for cy in ALL_RESIT_CLASSYEARS] if resits
+                else [(cy, False) for cy in ALL_CLASSYEARS])
+
+    is_resit = resits or val.endswith('r')
+    if val.endswith('r') and val not in CLASSYEAR_FILES:
+        val = val[:-1]
+    files = RESIT_CLASSYEAR_FILES if is_resit else CLASSYEAR_FILES
+    if val not in files:
+        valid = (', '.join(f'{cy}r' for cy in ALL_RESIT_CLASSYEARS) if is_resit
+                 else ', '.join(ALL_CLASSYEARS) + ', all, *')
         sys.exit(
-            f"Error: unrecognised --classyear '{raw}'.\n"
-            f"Valid values: {', '.join(ALL_CLASSYEARS)}, all, *"
+            f"Error: unrecognised {'resit ' if is_resit else ''}--classyear '{raw}'.\n"
+            f"Valid values: {valid}"
         )
-    return [val]
+    return [(val, is_resit)]
 
 
 # ===========================================================================
@@ -3248,7 +3675,7 @@ def main():
     if args.AY is not None and args.AY != AY:
         _configure_ay(args.AY)   # override the module default; re-derives INDIR, file maps, lists
     RESITS_ONE_COLUMN = args.resits_one_column   # CLI flag overrides the module default
-    classyears = resolve_classyears(args.classyear)
+    classyears = resolve_classyears(args.classyear, args.resits)
 
     multi  = len(classyears) > 1
     errors = 0
@@ -3259,12 +3686,13 @@ def main():
         buf.append(line)
 
     # ---- header ----
-    _out(f"PyAssess AY{AY}  —  processing {len(classyears)} classyear(s)")
+    kind = 'resit ' if all(r for _, r in classyears) else ''
+    _out(f"PyAssess AY{AY}  —  processing {len(classyears)} {kind}classyear(s)")
     _out('=' * 56)
 
     # ---- supplementary data files ----
     y3_credits = {}
-    if any(cy in ('4', '4m') for cy in classyears):
+    if any(cy in ('4', '4m') for cy, _ in classyears):
         y3cr_path = os.path.join(INDIR, Y3_CREDITS_FILE)
         y3_credits = read_y3_credits(y3cr_path)
         if y3_credits:
@@ -3288,17 +3716,17 @@ def main():
     if added_abroad:
         _out(f"  {_lbl('Study-abroad additions')}: {abroad_path}  ({added_abroad} added)")
 
-    for cy in classyears:
-        infile, outfile = CLASSYEAR_FILES[cy]
+    for cy, is_resit in classyears:
+        infile, outfile = (RESIT_CLASSYEAR_FILES if is_resit else CLASSYEAR_FILES)[cy]
         inpath  = os.path.join(INDIR,  infile)
         outpath = os.path.join(OUTDIR, outfile)
-        desc    = _CY_DESC.get(cy, cy)
+        desc    = _CY_DESC.get(cy, cy) + (' resits' if is_resit else '')
 
         _out()
-        _out(f"--- {desc}  (classyear {cy}) ---")
+        _out(f"--- {desc}  (classyear {cy}{'r' if is_resit else ''}) ---")
 
         try:
-            students = read_students(inpath)
+            students = read_students(inpath, resit=is_resit)
         except FileNotFoundError:
             _out(f"  WARNING: file not found — {inpath}")
             errors += 1
@@ -3317,6 +3745,19 @@ def main():
         n_units = len(students[0].units) if students else 0
         _out(f"  {_lbl('Input')}: {inpath}")
         _out(f"  {_lbl('Students')}: {len(students)} students, {n_units} units each")
+
+        if is_resit:
+            # The info row's June figures, recomputed from the June marks alone,
+            # then the August marks folded in before any of the normal rules run.
+            compute_june_outcomes(students, cy)
+            resit_warnings = apply_resit_marks(students)
+            n_resat = sum(1 for s in students for u in s.units if u.resat)
+            _out(f"  {_lbl('Resit marks')}: {n_resat} units resat")
+            if resit_warnings:
+                _out(f"  WARNING: {len(resit_warnings)} resit mark(s) without an "
+                     f"attempt code:")
+                for line in resit_warnings:
+                    _out(line)
 
         # AS Code (Achievement Status): RFYR/RYOA → Interrupt, EXIT → Withdrawn.
         n_int, n_wdr = apply_as_code_lists(students)
@@ -3420,7 +3861,8 @@ def main():
                     return (float('inf'), s.name or '')
             students.sort(key=_sort_key)
 
-        write_students(students, outpath, cy, hide_id_cols=not args.no_hidden)
+        write_students(students, outpath, cy, hide_id_cols=not args.no_hidden,
+                       resit=is_resit)
         _out(f"  {_lbl('Output')}: {outpath}")
 
         for line in _stats_lines(students, cy):
@@ -3438,12 +3880,15 @@ def main():
         _out(f"\n{errors} classyear(s) skipped due to missing or unreadable input files.")
 
     # ---- write report file ----
-    if set(classyears) == set(ALL_CLASSYEARS):
+    keys = [f"{cy}r" if r else cy for cy, r in classyears]
+    if set(classyears) == {(cy, False) for cy in ALL_CLASSYEARS}:
         tag = 'all'
-    elif len(classyears) == 1:
-        tag = classyears[0]
+    elif set(classyears) == {(cy, True) for cy in ALL_RESIT_CLASSYEARS}:
+        tag = 'all_resits'
+    elif len(keys) == 1:
+        tag = keys[0]
     else:
-        tag = '_'.join(classyears)
+        tag = '_'.join(keys)
     report_path = os.path.join(INDIR, f"pyassess_results_AY{AY}_{tag}.txt")
     try:
         with open(report_path, 'w', encoding='utf-8') as fh:
