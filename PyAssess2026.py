@@ -487,6 +487,26 @@ def _numeric_mark(value):
     except (TypeError, ValueError):
         return None
 
+def _mark_cell_value(value):
+    """Return *value* as a number when it is a bare numeric mark, else unchanged.
+
+    Marks arrive as text from the input grid, so Excel would store '78' as a
+    string and refuse to sort, average or compare it.  A mark carrying a letter
+    suffix ('36C' compensated, '30R' resit) has to stay text, as does anything
+    else that is not a plain number.
+    """
+    if value is None or isinstance(value, (int, float)):
+        return value
+    m = _MARK_NUM_RE.match(str(value).strip())
+    if not m or m.group(2):
+        return value           # letter suffix, or not a mark at all -> text
+    try:
+        num = float(m.group(1))
+    except ValueError:
+        return value           # e.g. '1.2.3'
+    return int(num) if num.is_integer() else num
+
+
 def _is_mc_excluded(output_code):
     """True if *output_code* marks a mitigating-circumstances exclusion.
 
@@ -583,7 +603,7 @@ class UnitInfo:
     __slots__ = ('unit_name', 'module', 'coursename', 'credits', 'mark', 'en', 'mit_circs',
                  'passed', 'excluded', 'output_code', 'capped',
                  'june_mark', 'june_code', 'resit_mark', 'resit_en', 'resat',
-                 'resit_taken', 'calc_mark')
+                 'resit_taken', 'calc_mark', 'june_compensated')
 
     def __init__(self, unit_name, module, mark, en, mit_circs):
         self.unit_name   = unit_name              # 'Unit 1', 'Unit 2', etc.
@@ -604,6 +624,7 @@ class UnitInfo:
         self.resat       = False                  # True if a resit mark is present
         self.resit_taken = False                  # True if the resit was actually sat (resat and not 'XN')
         self.calc_mark   = None                   # year-mark contribution when it differs from mark
+        self.june_compensated = False             # True if the June board compensated it ('36C')
 
     def __repr__(self):
         return (f'UnitInfo({self.unit_name}, coursename={self.coursename!r}, '
@@ -989,21 +1010,28 @@ class StudentInfo:
                 'must_pass': coursename in must_pass_for_cy,
                 'core':      coursename in core_for_cy,
                 'r2_en':     'R2' in _split_codes(unit.en),
+                'prev_c':    unit.june_compensated and coursename not in must_pass_for_cy,
             })
 
         failed_credits     = sum(u['credits'] for u in units)
         some_unit_under_30 = any(u['mark'] is None or not (u['mark'] > MIN_MARK) for u in units)
 
-        compensated = set()
+        # A unit the June board compensated keeps that 'C' without being classified
+        # again, and its credits use up the allowance first — as in calc_referrals.
+        compensated = {u['idx'] for u in units if u['prev_c']}
         if failed_credits <= COMPENSATION_CAP and not some_unit_under_30:
             # Full compensation: everything non-must-pass (and not a 2nd attempt) → C.
             for u in units:
+                if u['prev_c']:
+                    continue
                 if not u['must_pass'] and not u['r2_en']:
                     compensated.add(u['idx'])
         elif some_unit_under_30:
             # Referral path: zone non-core units → C while within the credit cap.
-            used = 0
+            used = sum(u['credits'] for u in units if u['prev_c'])
             for u in units:
+                if u['prev_c']:
+                    continue
                 if u['mark'] is None or not (u['mark'] > MIN_MARK):
                     continue                                  # under 30 → R2
                 if u['core'] or u['must_pass'] or u['r2_en']:
@@ -1015,6 +1043,8 @@ class StudentInfo:
         else:
             # Over the cap, all in the zone: non-core (and not a 2nd attempt) → C, no cap.
             for u in units:
+                if u['prev_c']:
+                    continue
                 if not u['core'] and not u['must_pass'] and not u['r2_en']:
                     compensated.add(u['idx'])
 
@@ -2193,13 +2223,36 @@ class StudentInfo:
             self.fail_reason = ' / '.join(fail_reasons)
             return
 
-        # All failed units flow through the same logic (lab=39 is just a zone unit).
-        other_failed_idx = list(self.failed_idx)
+        must_pass_for_cy = MUST_PASS_LAB | (MUST_PASS_MATHS if classyear == '1m' else frozenset())
+        core_for_cy      = CORE_PHYSICS | (CORE_MATHS_PHYSICS if classyear in ('1m', '2m')
+                                           else frozenset())
+
+        # In an August resit grid a unit the June board compensated keeps that
+        # compensation: it was not called back for a resit, so it is not classified
+        # again here — it stays 'C' whatever the rules below would make of its mark,
+        # which matters for a core unit, one over the allowance or one at a second
+        # attempt, each of which would otherwise be referred on.  Its credits still
+        # count as failed and still use up the compensation allowance, so the
+        # remaining failures see the same cap they always did.  A must-pass unit is
+        # never compensated, so one carrying a stray 'C' is left to the normal rules.
+        # Empty for June grids, which leaves every rule below exactly as it was.
+        june_comp_idx = [idx for idx in self.failed_idx
+                         if self.units[idx].june_compensated
+                         and (self.units[idx].coursename or self.units[idx].module)
+                         not in must_pass_for_cy]
+
+        # All remaining failed units flow through the same logic (lab=39 is just a
+        # zone unit).
+        other_failed_idx = [idx for idx in self.failed_idx if idx not in june_comp_idx]
 
         # --- classify all failed units ---
+        # failed_credits and some_unit_under_30 are taken over every failure, the
+        # June-compensated ones included: they decide which path below applies, and
+        # a unit's credits do not stop being failed credits because the June board
+        # compensated them.
         failed_credits     = 0
         some_unit_under_30 = False
-        for idx in other_failed_idx:
+        for idx in self.failed_idx:
             unit            = self.units[idx]
             failed_credits += unit.credits or 0
             num = _numeric_mark(unit.mark)
@@ -2208,16 +2261,19 @@ class StudentInfo:
 
         self.some_unit_under_30 = some_unit_under_30
 
-        must_pass_for_cy = MUST_PASS_LAB | (MUST_PASS_MATHS if classyear == '1m' else frozenset())
-        core_for_cy      = CORE_PHYSICS | (CORE_MATHS_PHYSICS if classyear in ('1m', '2m')
-                                           else frozenset())
-
         zone_idx            = []
         zone_courses        = []
         compensated_idx     = []
         compensated_courses = []
         referred_idx        = []
         referred_courses    = []
+
+        # June's compensations, carried straight through ahead of the new ones.
+        for idx in june_comp_idx:
+            unit = self.units[idx]
+            unit.output_code = _append_code(unit.output_code, 'C')
+            compensated_idx.append(idx)
+            compensated_courses.append(unit.coursename or unit.module)
 
         # In an August resit grid a unit already at its second attempt has no
         # sitting left, so it can never be referred on.  Where the June rules would
@@ -2254,7 +2310,7 @@ class StudentInfo:
 
         elif some_unit_under_30:
             # --- referral path ---
-            compensation_used = 0
+            compensation_used = sum(self.units[i].credits or 0 for i in june_comp_idx)
             for idx in other_failed_idx:
                 unit       = self.units[idx]
                 coursename = unit.coursename or unit.module
@@ -2325,6 +2381,13 @@ class StudentInfo:
                     compensated_courses.append(coursename)
 
         # --- Assign all results ---
+        # June's carried-over compensations were classified ahead of the new ones,
+        # so put the compensated units back in unit order for the output column.
+        comp_pairs          = sorted(zip(compensated_idx, compensated_courses),
+                                     key=lambda pair: pair[0])
+        compensated_idx     = [idx for idx, _ in comp_pairs]
+        compensated_courses = [course for _, course in comp_pairs]
+
         self.zone_idx            = zone_idx
         self.zone_courses        = zone_courses
         self.compensated_idx     = compensated_idx
@@ -2605,6 +2668,14 @@ def apply_resit_marks(students):
             june_codes = _split_codes(unit.june_code)
             resit_codes = _split_codes(unit.resit_en)
             unit.resit_taken = unit.resat and 'XN' not in resit_codes
+
+            # A unit the June board compensated (a 'C' suffix on the June mark, e.g.
+            # '36C') is settled: September does not reassess it, so it carries no
+            # August mark and is never referred on again.  Where the grid does hold
+            # an August mark the board evidently did call the unit back, so the
+            # ordinary rules apply and the flag stays clear.
+            unit.june_compensated = (not unit.resat
+                                     and _mark_suffix(unit.june_mark) == 'C')
 
             first  = bool(june_codes & _RESIT_FIRST_ATTEMPT_CODES)
             second = bool(june_codes & _RESIT_SECOND_ATTEMPT_CODES)
@@ -3028,6 +3099,14 @@ def write_students(students, outpath, classyear, hide_id_cols=True, resit=False)
                 cell.alignment = _ALIGN_CTR
             return cell
 
+        def _mark_c(row, col, value):
+            """Write a unit mark cell: numeric where the mark is a bare number,
+            and right-aligned so the numeric marks and the text ones that keep a
+            letter suffix ('36C') line up down the column."""
+            cell = _c(row, col, _mark_cell_value(value))
+            cell.alignment = _ALIGN_RIGHT
+            return cell
+
         # info row — fixed columns (ID column bold + centered)
         for i, (_, attr) in enumerate(_FIXED_COLS, start=1):
             cell = _c(info_row, i, getattr(s, attr))
@@ -3124,12 +3203,17 @@ def write_students(students, outpath, classyear, hide_id_cols=True, resit=False)
                 # June mark and the attempt code it was offered on row 2; the resit
                 # mark and every newly computed code on row 3.  Any highlight goes
                 # on the resit row, beside the code it belongs to.
-                _c(marks_row, col,     unit.june_mark)
+                _mark_c(marks_row, col, unit.june_mark)
                 _c(marks_row, col + 1, unit.june_code)
                 _c(resit_row, col + 1, unit.output_code)
-                mark_cell = _c(resit_row, col, unit.resit_mark)
+                # A unit compensated in June was not resat, so it has no August
+                # mark; repeat the June one so the resit row shows the mark that
+                # still stands beside its 'C'.
+                mark_cell = _mark_c(resit_row, col,
+                                    unit.june_mark if unit.june_compensated
+                                    else unit.resit_mark)
             else:
-                mark_cell = _c(marks_row, col, unit.mark)
+                mark_cell = _mark_c(marks_row, col, unit.mark)
             mark_num  = _numeric_mark(unit.mark)
             if suppress_fill or (resit and not unit.resat):
                 pass  # not assessed this cycle, or not resat: no status highlight
