@@ -332,6 +332,19 @@ _RESIT_DEFERRED_CODES = frozenset({'R1'})
 # (see apply_resit_marks).
 RESIT_CAP = 30.0
 
+# Deferral mark floors — the regulations for the intakes from 2026/27.  From the
+# academic year named here for a classyear, the mark a deferred ('R1') resit is
+# assessed on may not fall below a floor the June mark had already cleared, so a
+# deferred resit can no longer turn a pass into a fail, nor a compensatable fail
+# into an uncompensatable one.  Year 1 moves first and year 2 the year after, as
+# the intake moves up; in any earlier year the new mark stands as it falls (see
+# _deferral_floor).  A classyear absent from the map never floors.
+DEFERRAL_FLOOR_FROM_AY = {'1': 2027, '1m': 2027, '2': 2028, '2m': 2028}
+
+# The floors, tried in order: a June mark at or above the threshold holds the
+# resit mark up to the floor beside it.
+DEFERRAL_FLOORS = ((PASS_MARK, 40.0), (MIN_MARK, 30.0))
+
 # ===========================================================================
 # Data classes
 # ===========================================================================
@@ -595,10 +608,11 @@ class UnitInfo:
     """Data for a single unit (module) for one student.
 
     In a June grid *mark* is simply the mark read from the grid.  In an August
-    resit grid it is the mark the unit is assessed on — the better of the June
-    and resit marks (see apply_resit_marks) — while june_mark and resit_mark keep
-    the two attempts for output, and calc_mark holds the capped value that
-    contributes to the year average.
+    resit grid it is the mark the unit is assessed on — the resit mark (or, from
+    AY2027/AY2028, its floor) for a deferral, the better of the two otherwise
+    (see apply_resit_marks) — while
+    june_mark and resit_mark keep the two attempts for output, and calc_mark holds
+    the value that contributes to the year average.
     """
     __slots__ = ('unit_name', 'module', 'coursename', 'credits', 'mark', 'en', 'mit_circs',
                  'passed', 'excluded', 'output_code', 'capped',
@@ -1144,9 +1158,10 @@ class StudentInfo:
             mark = _numeric_mark(unit.mark)
             if mark is None:
                 continue
-            # Resit grids set calc_mark explicitly (the capped resit mark, or the
-            # June mark where that is higher); elsewhere a 2nd-attempt mark is
-            # capped at 30 and every other mark counts in full.
+            # Resit grids set calc_mark explicitly (the capped resit mark, the
+            # June mark where that is higher, or a deferral's resit mark whichever
+            # way it went); elsewhere a 2nd-attempt mark is capped at 30 and every
+            # other mark counts in full.
             if unit.calc_mark is not None:
                 calc_mark = unit.calc_mark
             else:
@@ -2634,15 +2649,43 @@ def read_students(filepath, resit=False):
     return students
 
 
-def apply_resit_marks(students):
+def _deferral_floor(june_num, resit_num, classyear):
+    """Return the floor a deferred ('R1') resit mark is held up to, or None.
+
+    A deferral is normally assessed on the August mark however it went: the June
+    sitting did not count, so the August one is the assessment.  From the academic
+    year DEFERRAL_FLOOR_FROM_AY names for this classyear, the regulations hold that
+    mark up to a floor the June mark had already cleared — a June mark at or above
+    40 may not be pulled below 40, and one at or above 30 may not be pulled below
+    30 — so a deferred resit cannot turn a pass into a fail, nor a compensatable
+    fail into an uncompensatable one.
+
+    Returns None when no floor applies (an earlier academic year, a classyear the
+    rule has not reached, no June mark to clear a threshold, or a resit mark that
+    needs no holding up), so the caller can keep the resit cell whole.
+    """
+    from_ay = DEFERRAL_FLOOR_FROM_AY.get(classyear)
+    if from_ay is None or AY < from_ay or june_num is None:
+        return None
+    for threshold, floor in DEFERRAL_FLOORS:
+        if june_num >= threshold and resit_num < floor:
+            return floor
+    return None
+
+
+def apply_resit_marks(students, classyear):
     """Fold the August resit marks into each unit, ready for the normal pipeline.
 
     Called once after read_students(..., resit=True) and before exclude_units().
     For every unit that was resat this sets, from the June mark and the resit mark:
 
-      unit.mark      the mark the unit is assessed on — the better of the two, so a
-                     resit that goes down cannot take a pass or a compensatable
-                     mark away.  Everything downstream (pass/fail, credits,
+      unit.mark      the mark the unit is assessed on.  For a deferral ('R1' on the
+                     June row) that is the August mark whether it is higher or
+                     lower: the June sitting did not count, so the August one is
+                     the assessment, and a mark that comes back lower does take a
+                     pass or a compensatable mark away.  Every other resit
+                     reassesses a mark the student did earn and is assessed on the
+                     better of the two.  Everything downstream (pass/fail, credits,
                      compensation, referrals) then runs exactly as it does in June.
       unit.calc_mark the mark that contributes to the year average.  For a second
                      attempt ('R2'/'A2' on the June row) that is the June mark
@@ -2650,17 +2693,28 @@ def apply_resit_marks(students):
                      mark capped at RESIT_CAP — so a second attempt that comes back
                      lower than a sub-30 June mark does lower the year average,
                      even though the unit is still assessed on the better mark.  A
-                     first attempt ('R1'/'A1' — a June deferral) is not capped and
-                     takes the better of the two, and neither is a lab sitting on
-                     39 offered a partial 'A2' reassessment.
+                     deferral ('R1') is not capped and is the August mark alone,
+                     down as well as up.  An 'A1' reassessment, and a lab sitting
+                     on 39 offered a partial 'A2' reassessment, are likewise
+                     uncapped but take the better of the two.
       unit.en        the June attempt code normalised to 'R1'/'R2' and joined with
                      any code beside the resit mark, so the standard rules see a
                      second attempt as one (no further resit is available).
 
     Units with no resit mark keep their June mark and are processed unchanged.
-    Returns a list of warning lines for the report.
+
+    From the academic year DEFERRAL_FLOOR_FROM_AY names for *classyear* — the
+    intakes from 2026/27, so Y1 from AY2027 and Y2 from AY2028 — a deferral's new
+    mark is held up to a floor the June mark had already cleared (see
+    _deferral_floor), and the floored value is what the unit is assessed on and
+    what counts in the year average.  For AY2025 and AY2026 no floor applies and
+    the new mark stands as it falls.
+
+    Returns (warnings, floored): warning lines for resit marks with no attempt
+    code, and a line per deferral the floor rule held up.
     """
     warnings = []
+    floored   = []
     for s in students:
         s.is_resit = True
         for unit in s.units:
@@ -2707,11 +2761,28 @@ def apply_resit_marks(students):
                            and june_num == 39.0
                            and bool(june_codes & {'A2'}))
 
-            # The unit is assessed on the better of the two attempts, so a resit
-            # that comes back lower cannot take away a pass or a compensatable
-            # mark.  The June value is kept whole (it may carry a 'C'/'R'
-            # accept-suffix) when it is the one that stands.
-            if june_num is None or resit_num >= june_num:
+            # A deferral ('R1') is the one case where the June sitting did not
+            # count: the unit stood outside the June year mark, so the August
+            # sitting is the assessment and its mark stands, higher or lower.  Any
+            # June mark on the grid beside an 'R1' is a figure the board set aside.
+            deferred = bool(june_codes & _RESIT_DEFERRED_CODES) and not second
+
+            # From AY2027 (Y1) / AY2028 (Y2) a deferral that comes back lower is
+            # held up to the floor the June mark had already cleared.
+            floor = _deferral_floor(june_num, resit_num, classyear) if deferred else None
+            if floor is not None:
+                floored.append(f"    {s.emplid}: {unit.coursename or unit.module} "
+                               f"deferred resit {resit_num:g} held at {floor:g} "
+                               f"(June {june_num:g})")
+
+            # Every other resit reassesses a mark the student did earn, so the unit
+            # is assessed on the better of the two attempts and a resit that comes
+            # back lower cannot take away a pass or a compensatable mark.  The June
+            # value is kept whole (it may carry a 'C'/'R' accept-suffix) when it is
+            # the one that stands.
+            if deferred:
+                unit.mark = unit.resit_mark if floor is None else floor
+            elif june_num is None or resit_num >= june_num:
                 unit.mark = unit.resit_mark
 
             if second and not lab_partial:
@@ -2720,12 +2791,16 @@ def apply_resit_marks(students):
                 # that is the lower of the two.
                 unit.calc_mark = (june_num if june_num is not None and june_num > MIN_MARK
                                   else min(resit_num, RESIT_CAP))
+            elif deferred:
+                # Deferral: uncapped, and the August mark alone (or its floor) — a
+                # lower one lowers the year average, and if it fails, the unit fails.
+                unit.calc_mark = resit_num if floor is None else floor
             else:
-                # First attempt (or a lab's partial reassessment): uncapped, and
-                # never below what the June sitting already earned.
+                # First-attempt reassessment ('A1'), or a lab's partial
+                # reassessment: uncapped, and never below what June already earned.
                 unit.calc_mark = (resit_num if june_num is None
                                   else max(june_num, resit_num))
-    return warnings
+    return warnings, floored
 
 
 def compute_june_outcomes(students, classyear):
@@ -3834,9 +3909,14 @@ def main():
             # The info row's June figures, recomputed from the June marks alone,
             # then the August marks folded in before any of the normal rules run.
             compute_june_outcomes(students, cy)
-            resit_warnings = apply_resit_marks(students)
+            resit_warnings, resit_floored = apply_resit_marks(students, cy)
             n_resat = sum(1 for s in students for u in s.units if u.resat)
             _out(f"  {_lbl('Resit marks')}: {n_resat} units resat")
+            if resit_floored:
+                _out(f"  {_lbl('Deferrals held up')}: {len(resit_floored)} "
+                     f"(AY{AY} floor rule)")
+                for line in resit_floored:
+                    _out(line)
             if resit_warnings:
                 _out(f"  WARNING: {len(resit_warnings)} resit mark(s) without an "
                      f"attempt code:")
