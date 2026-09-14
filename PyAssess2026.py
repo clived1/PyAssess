@@ -3,7 +3,7 @@
 # PyAssess2026.py - generates processed exam grids for Physics@Manchester
 # Author: Clive Dickinson
 # Date: 2026-05-30
-# Version: 1.0 (04-Jun-2026 almost ready for June exams - resits will do over the summer)
+# Version: 1.1 (14-Sep-2026, includes August 2026 resit results)
 
 # Requirements: 
 # -Python >3.10
@@ -314,7 +314,7 @@ _UNIT_COL_OFFSETS = {'module': 0, 'mark': 3, 'en': 4, 'mit_circs': 5}
 # The sheet has no separate 'Mark' column: the mark sits under the 'Module'
 # header on rows 2 and 3, and the block carries an extra 'Module2' column, so the
 # per-unit offsets differ from the June grids.
-RESIT_SHEET_NAME        = 'Style A With Gradebook RESIT'
+RESIT_SHEET_NAME        = 'Style A Plus With Gradebook RES'
 _RESIT_UNIT_COL_OFFSETS = {'module': 0, 'mark': 0, 'en': 4, 'mit_circs': 5}
 RESIT_ROWS_PER_STUDENT  = 3
 
